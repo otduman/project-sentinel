@@ -1,0 +1,39 @@
+# AlertManager Configuration — Project Sentinel
+#
+# AlertManager receives firing alerts from Prometheus and decides how to
+# route, group, and deliver them. Here every alert goes to the webhook
+# receiver that POSTs to sentinel-agent running on the host machine.
+
+global:
+  # Default timeout when resolving a receiver that stops responding
+  resolve_timeout: 1m
+
+route:
+  # The root route catches all alerts that don't match a child route.
+  # Because we have no child routes, everything is handled here.
+  receiver: sentinel-webhook
+
+  # How long to wait before sending the first notification after a new
+  # alert group is created. Gives time for related alerts to arrive and
+  # be batched into a single notification.
+  group_wait: 10s
+
+  # Minimum time between re-sending a notification for an alert group
+  # that has already fired and is still active.
+  group_interval: 1m
+
+  # How long to wait before resending a notification that has already
+  # been delivered and the alert has not yet resolved.
+  repeat_interval: 5m
+
+  # Group alerts by alert name so each unique rule fires its own thread.
+  group_by: ['alertname']
+
+receivers:
+  - name: sentinel-webhook
+    webhook_configs:
+      # sentinel-agent listens on host port 8081. host.docker.internal
+      # resolves to the Docker host from inside the alertmanager container.
+      - url: 'http://host.docker.internal:8081/webhook/prometheus'
+        # Send a notification when the alert resolves as well as when it fires.
+        send_resolved: true

@@ -1,0 +1,65 @@
+# Docker Compose — Project Sentinel
+#
+# Runs the full observability stack: Prometheus (scraping + alerting),
+# AlertManager (alert routing), and Grafana (dashboards).
+# lab-rat (Spring Boot) runs on the host machine, not in a container,
+# which is why Prometheus targets host.docker.internal:8080.
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Prometheus
+  # Scrapes lab-rat metrics, evaluates alert rules, and forwards firing alerts
+  # to AlertManager. --web.enable-lifecycle allows hot-reloading the config via
+  # POST /-/reload without restarting the container.
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: sentinel-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      # Main Prometheus config
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      # Alert rules evaluated every scrape cycle
+      - ./alert-rules.yml:/etc/prometheus/alert-rules.yml
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      # Enables POST /-/reload for config hot-reload without container restart
+      - '--web.enable-lifecycle'
+    depends_on:
+      - alertmanager
+
+  # ---------------------------------------------------------------------------
+  # AlertManager
+  # Receives alerts from Prometheus, groups them, applies silence/inhibition
+  # rules, and routes them to the configured receiver (sentinel-agent webhook).
+  # ---------------------------------------------------------------------------
+  alertmanager:
+    image: prom/alertmanager:latest
+    container_name: sentinel-alertmanager
+    ports:
+      # AlertManager UI and Prometheus-to-AlertManager API
+      - "9093:9093"
+    volumes:
+      # Routing and receiver configuration
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+
+  # ---------------------------------------------------------------------------
+  # Grafana
+  # Visualization layer. Datasource and dashboard setup is done manually via
+  # the UI or via provisioning files (not yet configured).
+  # Grafana automatically connects to datasources configured in the UI.
+  # ---------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:latest
+    container_name: sentinel-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    depends_on:
+      - prometheus

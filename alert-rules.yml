@@ -1,0 +1,73 @@
+# Prometheus Alert Rules — Project Sentinel
+#
+# These rules are evaluated on every scrape cycle. When an expression
+# stays true for the full `for` duration, Prometheus transitions the
+# alert from PENDING to FIRING and forwards it to AlertManager.
+
+groups:
+  - name: lab-rat.rules
+    rules:
+
+      # ---------------------------------------------------------------
+      # HighHeapUsage
+      # Fires when the JVM heap consumed by lab-rat exceeds 200 MB for
+      # at least 20 seconds. A sustained breach at this level is an
+      # early indicator of a memory leak before the JVM runs out of
+      # heap and starts throwing OutOfMemoryError.
+      # Threshold: 200 MB = 200 * 1024 * 1024 = 209,715,200 bytes
+      # ---------------------------------------------------------------
+      - alert: HighHeapUsage
+        expr: jvm_memory_used_bytes{area="heap"} > 209715200
+        for: 20s
+        labels:
+          severity: warning
+        annotations:
+          summary: "lab-rat heap usage is above 200 MB"
+          description: >
+            JVM heap on {{ $labels.instance }} has been above 200 MB for
+            over 20 seconds. Current value: {{ $value | humanize }}B.
+            Investigate for memory leaks or tune the heap size.
+
+      # ---------------------------------------------------------------
+      # CpuLatencySpike
+      # Fires when the average HTTP response time across all endpoints
+      # exceeds 2 seconds for at least 10 seconds.
+      # Derived from Spring Boot's http_server_requests_seconds metrics:
+      #   _sum  = total time spent across all requests
+      #   _count = total number of requests
+      # Dividing gives the mean latency per request.
+      # ---------------------------------------------------------------
+      - alert: CpuLatencySpike
+        expr: >
+          http_server_requests_seconds_sum
+          /
+          http_server_requests_seconds_count
+          > 2
+        for: 10s
+        labels:
+          severity: warning
+        annotations:
+          summary: "lab-rat average HTTP response time exceeds 2 seconds"
+          description: >
+            Mean HTTP response time on {{ $labels.instance }} has been
+            above 2 s for over 10 seconds. Current value: {{ $value }}s.
+            Check for slow endpoints, thread exhaustion, or GC pauses.
+
+      # ---------------------------------------------------------------
+      # AppDown
+      # Fires when Prometheus cannot scrape lab-rat at all (the `up`
+      # metric drops to 0) for at least 10 seconds. This could mean the
+      # Spring Boot process crashed, the port is unreachable, or the
+      # actuator endpoint is broken.
+      # ---------------------------------------------------------------
+      - alert: AppDown
+        expr: up{job="lab-rat"} == 0
+        for: 10s
+        labels:
+          severity: critical
+        annotations:
+          summary: "lab-rat is unreachable"
+          description: >
+            Prometheus has been unable to scrape {{ $labels.instance }}
+            for over 10 seconds. Verify the Spring Boot process is
+            running and that /actuator/prometheus is accessible.

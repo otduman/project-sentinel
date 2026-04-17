@@ -1,0 +1,519 @@
+/* ============================================================
+   Project Sentinel — Dashboard CSS
+   Fonts: Inter (400, 500, 600, 700) + JetBrains Mono (400)
+   ============================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400&display=swap');
+
+/* ── Reset & Base ── */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --bg:           #0d1117;
+  --surface:      #161b22;
+  --border:       #30363d;
+  --border-hover: #58a6ff;
+  --text:         #e6edf3;
+  --text-dim:     #7d8590;
+  --green:        #3fb950;
+  --amber:        #d29922;
+  --red:          #f85149;
+  --unknown:      #6e7681;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 13px;
+  overflow: hidden;
+}
+
+#root {
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── Command Room wrapper ── */
+.command-room {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+/* ============================================================
+   HUD BAR — top header
+   ============================================================ */
+
+.hud-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 20px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  z-index: 10;
+  user-select: none;
+}
+
+.hud-left {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.hud-logo {
+  font-family: 'Inter', system-ui, sans-serif;
+  font-weight: 700;
+  font-size: 16px;
+  letter-spacing: 0.15em;
+  color: var(--text);
+}
+
+.hud-sub {
+  font-family: 'Inter', system-ui, sans-serif;
+  font-weight: 400;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  color: var(--text-dim);
+}
+
+.hud-center {
+  display: flex;
+  align-items: center;
+}
+
+.sys-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: 'Inter', system-ui, sans-serif;
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  padding: 4px 14px;
+  border-radius: 4px;
+  border: 1px solid;
+}
+
+.sys-status.status-ok {
+  color: var(--green);
+  border-color: rgba(63, 185, 80, 0.35);
+  background: rgba(63, 185, 80, 0.07);
+}
+
+.sys-status.status-degraded {
+  color: var(--amber);
+  border-color: rgba(210, 153, 34, 0.35);
+  background: rgba(210, 153, 34, 0.07);
+}
+
+.sys-status-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+.hud-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+}
+
+.hud-label {
+  font-family: 'Inter', system-ui, sans-serif;
+  color: var(--text-dim);
+  letter-spacing: 0.08em;
+}
+
+.hud-value {
+  font-family: 'JetBrains Mono', 'Courier New', monospace;
+  color: var(--text);
+  letter-spacing: 0.04em;
+}
+
+.sys-clock {
+  font-family: 'JetBrains Mono', 'Courier New', monospace;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.hud-sep {
+  width: 1px;
+  height: 16px;
+  background: var(--border);
+}
+
+/* ============================================================
+   MAIN LAYOUT — SVG map + alert panel side by side
+   ============================================================ */
+
+.main-layout {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ============================================================
+   SVG CONTAINER — fills available space, holds the SVG map
+   ============================================================ */
+
+.svg-container {
+  position: relative;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* ============================================================
+   ZOOM CONTROLS
+   ============================================================ */
+
+.zoom-controls {
+  position: absolute;
+  bottom: 16px;
+  right: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  z-index: 10;
+  user-select: none;
+}
+
+.zoom-btn {
+  width: 32px;
+  height: 32px;
+  background: #161b22;
+  border: 1px solid #30363d;
+  color: #e6edf3;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 16px;
+  font-family: 'Inter', system-ui, sans-serif;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 150ms ease;
+}
+
+.zoom-btn:hover {
+  border-color: var(--border-hover);
+}
+
+.zoom-level {
+  font-family: 'JetBrains Mono', 'Courier New', monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+  min-width: 40px;
+  text-align: center;
+}
+
+/* ============================================================
+   SVG ANIMATIONS
+   ============================================================ */
+
+@keyframes border-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.35; }
+}
+
+.border-pulse {
+  animation: border-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes dot-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.3; }
+}
+
+.dot-pulse {
+  animation: dot-pulse 2s ease-in-out infinite;
+}
+
+/* ============================================================
+   HEX CELL GROUP — issue 5 hover feel
+   ============================================================ */
+
+.hex-cell-group {
+  cursor: grab;
+  /* Filter (glow) transitions smoothly; position changes are instant (snappy) */
+  transition: filter 200ms ease;
+}
+
+.hex-cell-group:active {
+  cursor: grabbing;
+}
+
+/* ============================================================
+   FLOW DASH — animated stroke-dashoffset on SVG connection lines
+
+   Issue 1 fix: these animated dashes now render in layer 6,
+   above hex fills AND strokes, so they are never covered.
+
+   Issue 7 fix: dashoffset updated from -22 to -12 to match
+   the new dasharray="4 8" (cycle length = 12).
+   ============================================================ */
+
+/* Adjacent shared-edge flow */
+@keyframes flowDash {
+  to { stroke-dashoffset: -12; }
+}
+
+.flow-dash {
+  stroke-dashoffset: 0;
+  animation: flowDash 1.2s linear infinite;
+}
+
+/* Non-adjacent center-to-center flow (issue 2 fallback) */
+@keyframes flowDashDistant {
+  to { stroke-dashoffset: -13; }
+}
+
+.flow-dash-distant {
+  stroke-dashoffset: 0;
+  animation: flowDashDistant 1.8s linear infinite;
+}
+
+/* ============================================================
+   SNAP TARGET PULSE — hex highlight during block drag
+   ============================================================ */
+
+@keyframes snapPulse {
+  0%, 100% { opacity: 0.4; }
+  50%       { opacity: 0.8; }
+}
+
+.snap-target-pulse {
+  animation: snapPulse 1s ease-in-out infinite alternate;
+}
+
+/* ============================================================
+   ALERT PANEL (right sidebar)
+   ============================================================ */
+
+.alert-panel {
+  width: 280px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: #0d1117;
+  border-left: 1px solid #30363d;
+  overflow: hidden;
+}
+
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.panel-title {
+  font-family: 'Inter', system-ui, sans-serif;
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.15em;
+  color: var(--text-dim);
+}
+
+.panel-count {
+  font-family: 'Inter', system-ui, sans-serif;
+  font-weight: 600;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: var(--red);
+  border: 1px solid rgba(248, 81, 73, 0.3);
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+
+.alert-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.alert-list::-webkit-scrollbar { width: 4px; }
+.alert-list::-webkit-scrollbar-track { background: transparent; }
+.alert-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+.alert-empty {
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--green);
+  text-align: center;
+  padding: 24px 12px;
+  opacity: 0.8;
+  line-height: 1.6;
+}
+
+.alert-entry {
+  padding: 8px 10px;
+  border-left: 3px solid transparent;
+  border-radius: 3px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.alert-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.alert-name {
+  font-family: 'Inter', system-ui, sans-serif;
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--text);
+  word-break: break-word;
+  flex: 1;
+}
+
+.alert-state {
+  font-family: 'Inter', system-ui, sans-serif;
+  font-weight: 600;
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  flex-shrink: 0;
+}
+
+.alert-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.alert-sev {
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+}
+
+.alert-time {
+  font-family: 'JetBrains Mono', 'Courier New', monospace;
+  font-size: 9px;
+  color: var(--text-dim);
+}
+
+/* ============================================================
+   STATUS BAR — bottom
+   ============================================================ */
+
+.status-bar {
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  height: 32px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+  overflow: hidden;
+  user-select: none;
+}
+
+.status-bar-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  height: 100%;
+  border-right: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.status-bar-item:first-child {
+  padding-left: 0;
+}
+
+.status-bar-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.sbar-dot-up   { background: var(--green); }
+.sbar-dot-down { background: var(--red); }
+
+.status-bar-name {
+  font-family: 'Inter', system-ui, sans-serif;
+  font-weight: 600;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.status-bar-state {
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+}
+
+.state-up   { color: var(--green); }
+.state-down { color: var(--red); }
+
+.heap-reading {
+  font-family: 'JetBrains Mono', 'Courier New', monospace;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
+.status-bar-poll {
+  margin-left: auto;
+  border-right: none;
+  border-left: 1px solid var(--border);
+  color: var(--text-dim);
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  gap: 8px;
+}
+
+.poll-indicator {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #58a6ff;
+  animation: poll-spin 3s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes poll-spin {
+  0%   { opacity: 1;   transform: scale(1); }
+  45%  { opacity: 0.2; transform: scale(0.6); }
+  50%  { opacity: 0.2; transform: scale(0.6); }
+  95%  { opacity: 1;   transform: scale(1); }
+  100% { opacity: 1;   transform: scale(1); }
+}

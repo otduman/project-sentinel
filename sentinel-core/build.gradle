@@ -1,0 +1,38 @@
+plugins {
+    id 'java-library'
+}
+
+group = 'com.sentinel'
+version = '1.0-SNAPSHOT'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // ByteBuddy for dynamic proxying and bytecode manipulation
+    implementation 'net.bytebuddy:byte-buddy:1.14.13'
+    // Bytebuddy Agent contains the JVM Attach API wrappers allowing us to attach to external JVMs
+    implementation 'net.bytebuddy:byte-buddy-agent:1.14.13'
+}
+
+// We must build a 'fat jar' so that when it is injected into lab-rat, all the byte-buddy classes are available.
+jar {
+    manifest {
+        attributes(
+            'Agent-Class': 'com.sentinel.core.profiler.SentinelAgentMain',
+            'Can-Redefine-Classes': 'true',
+            'Can-Retransform-Classes': 'true'
+        )
+    }
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}

@@ -1,0 +1,51 @@
+plugins {
+	id 'java'
+	id 'org.springframework.boot' version '4.0.5'
+	id 'io.spring.dependency-management' version '1.1.7'
+}
+
+group = 'com.sentinel'
+version = '0.0.1-SNAPSHOT'
+
+java {
+	toolchain {
+		languageVersion = JavaLanguageVersion.of(21)
+	}
+}
+
+repositories {
+	mavenCentral()
+}
+
+dependencies {
+	implementation 'org.springframework.boot:spring-boot-starter-web'
+	
+	// Implementation from @agency-ai-engineer for the Brain
+	implementation 'dev.langchain4j:langchain4j:0.35.0'
+	implementation 'dev.langchain4j:langchain4j-google-ai-gemini:0.35.0'
+	implementation 'dev.langchain4j:langchain4j-spring-boot-starter:0.35.0'
+	
+	// Integrating the physical hands from Stage 2
+	implementation project(':sentinel-core')
+
+	testImplementation 'org.springframework.boot:spring-boot-starter-test'
+	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.named('test') {
+	useJUnitPlatform()
+}
+
+// Load .env from project root and pass as environment variables to bootRun.
+// This means you never have to set GEMINI_API_KEY manually in your terminal.
+tasks.named('bootRun') {
+	def envFile = rootProject.file('.env')
+	if (envFile.exists()) {
+		envFile.readLines().each { line ->
+			if (!line.startsWith('#') && line.contains('=')) {
+				def parts = line.split('=', 2)
+				environment parts[0].trim(), parts[1].trim()
+			}
+		}
+	}
+}

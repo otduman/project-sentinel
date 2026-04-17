@@ -1,0 +1,35 @@
+# Prometheus Configuration — Project Sentinel
+
+global:
+  scrape_interval: 2s # Fast interval for testing/chaos
+
+# ---------------------------------------------------------------------------
+# Alerting
+# Tells Prometheus where to send firing alerts. alertmanager is resolved via
+# Docker's internal DNS because both containers share the same Compose network.
+# ---------------------------------------------------------------------------
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - 'alertmanager:9093'
+
+# ---------------------------------------------------------------------------
+# Rule Files
+# Prometheus loads these files and evaluates every rule on each scrape cycle.
+# The path is the in-container path set by the volume mount in docker-compose.
+# ---------------------------------------------------------------------------
+rule_files:
+  - '/etc/prometheus/alert-rules.yml'
+
+# ---------------------------------------------------------------------------
+# Scrape Configs
+# Unchanged from original — scrapes lab-rat's Spring Boot actuator endpoint.
+# host.docker.internal resolves to the host machine from inside the container.
+# ---------------------------------------------------------------------------
+scrape_configs:
+  - job_name: 'lab-rat'
+    metrics_path: '/actuator/prometheus'
+    static_configs:
+      # host.docker.internal allows the docker container to scrape our local host machine where Spring Boot runs
+      - targets: ['host.docker.internal:8080']
