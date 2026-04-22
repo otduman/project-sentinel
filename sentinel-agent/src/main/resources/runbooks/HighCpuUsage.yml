@@ -1,0 +1,13 @@
+alertName: HighCpuUsage
+title: High CPU Utilisation
+severity: warning
+description: >
+  CPU usage is sustained above the warning threshold. Likely caused by a CPU-intensive
+  computation, hot loop, or thread contention forcing repeated context switching.
+steps:
+  - Check logs for evidence of a latency-inducing computation (Fibonacci, sorting large data sets)
+  - Check if /chaos/cpu-spike or /chaos/latency was recently triggered
+  - Use the profiler to identify which methods consume the most CPU time
+  - Look for tight loops with no sleep or yield that peg a CPU core
+  - Check thread count — thread starvation can cause spinning on synchronisation primitives
+  - Proposed fix should add computation limits, caching, or switch to an efficient algorithm

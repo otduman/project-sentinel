@@ -1,0 +1,13 @@
+alertName: ThreadDeadlock
+title: Thread Deadlock Detected
+severity: critical
+description: >
+  Two or more threads are permanently blocked waiting for locks held by each other.
+  The JVM thread dump will show threads in BLOCKED state with a circular wait chain.
+steps:
+  - Check if /chaos/thread-deadlock was recently triggered — threads named deadlock-t1, deadlock-t2
+  - Run jstack or jcmd <pid> Thread.print to get a thread dump showing the deadlock chain
+  - Identify which locks are held and which are being waited on
+  - Ensure all code acquires multiple locks in a consistent global order
+  - Replace synchronized blocks with ReentrantLock.tryLock(timeout) to allow timeout-based recovery
+  - Proposed fix should enforce lock ordering or use tryLock with a timeout and retry

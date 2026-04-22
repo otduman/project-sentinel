@@ -1,0 +1,13 @@
+alertName: DiskFull
+title: Disk Space Exhausted
+severity: critical
+description: >
+  Available disk space has dropped below the critical threshold. Application writes
+  will fail with IOException. Log rotation may also stop, hiding other errors.
+steps:
+  - Check if /chaos/disk-fill was recently triggered — look for sentinel-chaos-disk-*.bin temp files in /tmp
+  - Identify the largest directories consuming disk space
+  - Delete old log files, temp files, and build artifacts
+  - Check if log rotation is configured and working
+  - Review application code for unbounded file writes or missing cleanup
+  - Proposed fix should delete the chaos temp file or add disk-space-aware write guards

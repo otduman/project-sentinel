@@ -24,12 +24,13 @@ rule_files:
 
 # ---------------------------------------------------------------------------
 # Scrape Configs
-# Unchanged from original — scrapes lab-rat's Spring Boot actuator endpoint.
-# host.docker.internal resolves to the host machine from inside the container.
+# Scrapes lab-rat's Spring Boot actuator endpoint.
+# lab-rat is resolved via Docker's internal DNS because both containers share
+# the same Compose network (sentinel-net).
 # ---------------------------------------------------------------------------
 scrape_configs:
   - job_name: 'lab-rat'
     metrics_path: '/actuator/prometheus'
     static_configs:
-      # host.docker.internal allows the docker container to scrape our local host machine where Spring Boot runs
-      - targets: ['host.docker.internal:8080']
+      # lab-rat is a named container on sentinel-net — Docker DNS resolves it directly
+      - targets: ['lab-rat:8080']

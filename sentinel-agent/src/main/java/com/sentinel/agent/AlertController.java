@@ -4,7 +4,6 @@ import org.springframework.core.task.TaskExecutor;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;
-import java.util.UUID;
 
 /**
  * Webhook receiver for Prometheus AlertManager.
@@ -15,10 +14,14 @@ public class AlertController {
 
     private final SreAgent sreAgent;
     private final TaskExecutor investigationExecutor;
+    private final InvestigationService investigationService;
 
-    public AlertController(SreAgent sreAgent, TaskExecutor investigationExecutor) {
+    public AlertController(SreAgent sreAgent,
+                           TaskExecutor investigationExecutor,
+                           InvestigationService investigationService) {
         this.sreAgent = sreAgent;
         this.investigationExecutor = investigationExecutor;
+        this.investigationService = investigationService;
     }
 
     @PostMapping
@@ -43,14 +46,17 @@ public class AlertController {
                 + " | Severity: " + severity
                 + (summary.isEmpty() ? "" : " | Summary: " + summary);
 
-        String memoryId = UUID.randomUUID().toString();
+        // Persist the investigation immediately so the dashboard can show it as PENDING.
+        Investigation investigation = investigationService.start(alertName, severity);
+
         investigationExecutor.execute(() -> {
             try {
-                String result = sreAgent.investigate(memoryId, incidentDescription);
-                System.out.println("[Sentinel] Investigation [" + memoryId + "] complete:\n" + result);
-                // TODO: Stage 4 — persist result and/or open a PR via proposeFix output
+                String result = sreAgent.investigate(investigation.getId().toString(), incidentDescription);
+                System.out.println("[Sentinel] Investigation [" + investigation.getId() + "] complete:\n" + result);
+                investigationService.complete(investigation.getId(), result);
             } catch (Exception e) {
-                System.err.println("[Sentinel] Investigation [" + memoryId + "] failed: " + e.getMessage());
+                System.err.println("[Sentinel] Investigation [" + investigation.getId() + "] failed: " + e.getMessage());
+                investigationService.fail(investigation.getId(), e.getMessage());
             }
         });
     }

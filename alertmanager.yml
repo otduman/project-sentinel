@@ -32,8 +32,8 @@ route:
 receivers:
   - name: sentinel-webhook
     webhook_configs:
-      # sentinel-agent listens on host port 8081. host.docker.internal
-      # resolves to the Docker host from inside the alertmanager container.
-      - url: 'http://host.docker.internal:8081/webhook/prometheus'
+      # sentinel-agent is a named container on sentinel-net — Docker DNS resolves
+      # it directly without needing host.docker.internal.
+      - url: 'http://sentinel-agent:8081/webhook/prometheus'
         # Send a notification when the alert resolves as well as when it fires.
         send_resolved: true

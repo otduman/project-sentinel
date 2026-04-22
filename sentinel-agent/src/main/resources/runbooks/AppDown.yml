@@ -1,0 +1,14 @@
+alertName: AppDown
+title: Application Instance Down
+severity: critical
+description: >
+  The monitored application is not responding to health checks. Could be a crash,
+  OOM kill, port conflict, or failed startup due to a dependency being unavailable.
+steps:
+  - Check recent error logs for a fatal exception or OOM error immediately before shutdown
+  - Verify the process is not running (getLabRatPid should return an error)
+  - Check if the JVM ran out of heap memory (OutOfMemoryError in logs)
+  - Check if a port conflict prevented startup
+  - Inspect dependent services — database, external APIs — for failures
+  - Restart the service and monitor for immediate re-crash
+  - If OOM: reduce memory allocation rate or increase -Xmx

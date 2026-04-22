@@ -19,14 +19,18 @@ repositories {
 
 dependencies {
 	implementation 'org.springframework.boot:spring-boot-starter-web'
-	
-	// Implementation from @agency-ai-engineer for the Brain
+	implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+	implementation 'com.fasterxml.jackson.core:jackson-databind'
+
 	implementation 'dev.langchain4j:langchain4j:0.35.0'
 	implementation 'dev.langchain4j:langchain4j-google-ai-gemini:0.35.0'
 	implementation 'dev.langchain4j:langchain4j-spring-boot-starter:0.35.0'
-	
-	// Integrating the physical hands from Stage 2
+
 	implementation project(':sentinel-core')
+
+	// Database drivers — H2 for dev/default, Postgres for production profile
+	runtimeOnly 'com.h2database:h2'
+	runtimeOnly 'org.postgresql:postgresql'
 
 	testImplementation 'org.springframework.boot:spring-boot-starter-test'
 	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'

@@ -29,6 +29,19 @@ interface AppState {
   lastPoll: number;
 }
 
+interface Investigation {
+  id: string;
+  alertName: string;
+  severity: string;
+  status: 'PENDING' | 'INVESTIGATING' | 'COMPLETE' | 'FAILED';
+  startedAt: string;
+  completedAt: string | null;
+  symptoms: string | null;
+  evidence: string | null;
+  rootCause: string | null;
+  proposedFix: string | null;
+}
+
 // ---------------------------------------------------------------------------
 // Service configuration
 // ---------------------------------------------------------------------------
@@ -107,6 +120,14 @@ async function fetchAlerts(): Promise<AlertEntry[]> {
   } catch {
     return [];
   }
+}
+
+async function fetchInvestigations(): Promise<Investigation[]> {
+  try {
+    const res = await fetch('http://localhost:8081/api/investigations', { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) return [];
+    return res.json();
+  } catch { return []; }
 }
 
 // ---------------------------------------------------------------------------
@@ -190,6 +211,113 @@ function useCommandRoom() {
   }, [poll]);
 
   return state;
+}
+
+// ---------------------------------------------------------------------------
+// useInvestigations hook — SSE + REST for investigation history
+// ---------------------------------------------------------------------------
+
+function useInvestigations() {
+  const [investigations, setInvestigations] = useState<Investigation[]>([]);
+  const [activeInvestigationCount, setActiveInvestigationCount] = useState(0);
+  const [sseConnected, setSseConnected] = useState(false);
+  // Webhook-sourced alerts: created instantly from SSE so the ALERTS tab always
+  // shows a record even when the alert resolves before the next poll cycle.
+  const [webhookAlerts, setWebhookAlerts] = useState<AlertEntry[]>([]);
+
+  useEffect(() => {
+    // Initial fetch
+    fetchInvestigations().then(data => setInvestigations(data));
+
+    // SSE stream
+    const es = new EventSource('http://localhost:8081/api/investigations/stream');
+    es.onopen = () => setSseConnected(true);
+
+    es.addEventListener('investigation_started', (e: MessageEvent) => {
+      try {
+        const payload = JSON.parse(e.data) as { id: string; alertName: string; severity: string };
+        const newInv: Investigation = {
+          id: payload.id,
+          alertName: payload.alertName,
+          severity: payload.severity,
+          status: 'INVESTIGATING',
+          startedAt: new Date().toISOString(),
+          completedAt: null,
+          symptoms: null,
+          evidence: null,
+          rootCause: null,
+          proposedFix: null,
+        };
+        setInvestigations(prev => [newInv, ...prev]);
+        setActiveInvestigationCount(n => n + 1);
+        // Inject a synthetic alert so the ALERTS tab shows it even if the
+        // AlertManager poll missed the window.
+        setWebhookAlerts(prev => {
+          // Don't add a duplicate if one already exists for this alertname.
+          if (prev.some(a => a.alertname === payload.alertName)) return prev;
+          const synth: AlertEntry = {
+            id: `webhook-${payload.id}`,
+            alertname: payload.alertName,
+            severity: payload.severity,
+            state: 'active',
+            timestamp: Date.now(),
+            labels: {},
+          };
+          return [synth, ...prev];
+        });
+      } catch { /* ignore malformed */ }
+    });
+
+    es.addEventListener('investigation_complete', (e: MessageEvent) => {
+      try {
+        const { id } = JSON.parse(e.data) as { id: string };
+        // SSE payload is minimal — fetch full record (with parsed sections) from REST.
+        fetch(`http://localhost:8081/api/investigations/${id}`, { signal: AbortSignal.timeout(5000) })
+          .then(r => r.ok ? r.json() : null)
+          .then((full: Investigation | null) => {
+            if (!full) return;
+            setInvestigations(prev =>
+              prev.map(inv => inv.id === id ? full : inv)
+            );
+          })
+          .catch(() => {
+            setInvestigations(prev =>
+              prev.map(inv => inv.id === id ? { ...inv, status: 'COMPLETE' } : inv)
+            );
+          });
+        setActiveInvestigationCount(n => Math.max(0, n - 1));
+        // Mark the synthetic alert resolved now that the investigation is done.
+        setWebhookAlerts(prev =>
+          prev.map(a => a.id === `webhook-${id}` ? { ...a, state: 'resolved' } : a)
+        );
+      } catch { /* ignore malformed */ }
+    });
+
+    es.addEventListener('investigation_failed', (e: MessageEvent) => {
+      try {
+        const payload = JSON.parse(e.data) as { id: string; alertName: string; severity: string };
+        setInvestigations(prev =>
+          prev.map(inv => inv.id === payload.id ? { ...inv, status: 'FAILED' } : inv)
+        );
+        setActiveInvestigationCount(n => Math.max(0, n - 1));
+        // Mark the synthetic alert resolved.
+        setWebhookAlerts(prev =>
+          prev.map(a => a.id === `webhook-${payload.id}` ? { ...a, state: 'resolved' } : a)
+        );
+      } catch { /* ignore malformed */ }
+    });
+
+    // heartbeat — no-op, just keeps connection alive
+    es.addEventListener('heartbeat', () => {});
+
+    es.onerror = () => {
+      setSseConnected(false);
+    };
+
+    return () => es.close();
+  }, []);
+
+  return { investigations, activeInvestigationCount, sseConnected, webhookAlerts };
 }
 
 // ---------------------------------------------------------------------------
@@ -591,73 +719,16 @@ interface HexStyle {
 }
 
 // ---------------------------------------------------------------------------
-// AlertPanel component
-// ---------------------------------------------------------------------------
-
-function AlertPanel({ alerts }: { alerts: AlertEntry[] }) {
-  const panelRef = useRef<HTMLDivElement>(null);
-
-  const severityColor = (sev: string, state: string): string => {
-    if (state === 'resolved') return '#3fb950';
-    if (sev === 'critical') return '#f85149';
-    if (sev === 'warning') return '#d29922';
-    return '#7d8590';
-  };
-
-  const stateTag = (state: string): string => {
-    if (state === 'resolved') return 'RESOLVED';
-    if (state === 'suppressed') return 'SUPPRESSED';
-    return 'FIRING';
-  };
-
-  return (
-    <div className="alert-panel">
-      <div className="panel-header">
-        <span className="panel-title">ALERT LOG</span>
-        <span className="panel-count">{alerts.filter(a => a.state === 'active').length} ACTIVE</span>
-      </div>
-      <div className="alert-list" ref={panelRef}>
-        {alerts.length === 0 ? (
-          <div className="alert-empty">NO ALERTS — ALL SYSTEMS NOMINAL</div>
-        ) : (
-          alerts.map((alert) => (
-            <div
-              key={alert.id}
-              className="alert-entry"
-              style={{ borderLeftColor: severityColor(alert.severity, alert.state) }}
-            >
-              <div className="alert-top">
-                <span className="alert-name">{alert.alertname}</span>
-                <span className="alert-state" style={{ color: severityColor(alert.severity, alert.state) }}>
-                  {stateTag(alert.state)}
-                </span>
-              </div>
-              <div className="alert-meta">
-                <span className="alert-sev" style={{ color: severityColor(alert.severity, alert.state) }}>
-                  [{alert.state === 'resolved' ? 'RESOLVED' : alert.severity.toUpperCase()}]
-                </span>
-                <span className="alert-time">
-                  {new Date(alert.timestamp).toLocaleTimeString('en-US', { hour12: false })}
-                </span>
-              </div>
-            </div>
-          ))
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
 // HexMap — SVG-based infrastructure map
 // ---------------------------------------------------------------------------
 
 interface HexMapProps {
   services: Record<ServiceId, ServiceState>;
   alerts: AlertEntry[];
+  activeInvestigationCount: number;
 }
 
-function HexMap({ services, alerts }: HexMapProps) {
+function HexMap({ services, alerts, activeInvestigationCount }: HexMapProps) {
   const [transform, setTransform] = useState({ x: 0, y: 0, scale: 1 });
   const [isDragging, setIsDragging] = useState(false);
   const dragging = useRef(false);
@@ -1192,6 +1263,46 @@ function HexMap({ services, alerts }: HexMapProps) {
             })}
           </g>
 
+          {/* ── Investigating badge on sentinel-agent hex ── */}
+          {activeInvestigationCount > 0 && (() => {
+            const sentinelCenter = liveCenters['sentinel-agent'];
+            const isDraggingThis = draggingBlock?.id === 'sentinel-agent';
+            if (isDraggingThis) return null;
+            const isHovered = hoveredHex === 'sentinel-agent';
+            const bx = sentinelCenter.x + 30;
+            const by = (isHovered ? sentinelCenter.y - 3 : sentinelCenter.y) - 45;
+            return (
+              <g key="investigating-badge" style={{ pointerEvents: 'none' }}>
+                <rect
+                  x={bx - 38}
+                  y={by - 9}
+                  width={76}
+                  height={17}
+                  rx={3}
+                  fill="#0d1520"
+                  stroke="#3b82f6"
+                  strokeWidth={1}
+                  opacity={0.92}
+                  className="snap-target-pulse"
+                />
+                <text
+                  x={bx}
+                  y={by + 0.5}
+                  textAnchor="middle"
+                  dominantBaseline="middle"
+                  fontSize={8}
+                  fontFamily="'JetBrains Mono', 'Courier New', monospace"
+                  fontWeight={600}
+                  fill="#3b82f6"
+                  letterSpacing={1.2}
+                  className="snap-target-pulse"
+                >
+                  INVESTIGATING
+                </text>
+              </g>
+            );
+          })()}
+
           {/* ── Drag ghost overlay — dragged hex renders last (topmost) ── */}
           {draggingBlock && (() => {
             const id = draggingBlock.id;
@@ -1298,11 +1409,330 @@ function HexMap({ services, alerts }: HexMapProps) {
 }
 
 // ---------------------------------------------------------------------------
+// CommandSidebar — unified alerts + investigations panel
+// ---------------------------------------------------------------------------
+
+function relativeTime(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime();
+  const s = Math.floor(diff / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
+function severityColor(sev: string, state?: string): string {
+  if (state === 'resolved') return '#3fb950';
+  if (sev === 'critical') return '#ef4444';
+  if (sev === 'warning') return '#eab308';
+  return '#3b82f6';
+}
+
+function invStatusColor(status: Investigation['status']): string {
+  if (status === 'INVESTIGATING') return '#3b82f6';
+  if (status === 'COMPLETE') return '#22c55e';
+  if (status === 'FAILED') return '#ef4444';
+  return '#6b7280';
+}
+
+interface CommandSidebarProps {
+  alerts: AlertEntry[];
+  webhookAlerts: AlertEntry[];
+  investigations: Investigation[];
+  activeCount: number;
+  sseConnected: boolean;
+}
+
+function CommandSidebar({ alerts, webhookAlerts, investigations, activeCount, sseConnected }: CommandSidebarProps) {
+  const [tab, setTab] = useState<'alerts' | 'investigations'>('alerts');
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  // Merge polled alerts with webhook-sourced ones, deduplicating by alertname.
+  // Real polled alerts take priority; webhook synthetics fill in the gaps.
+  const mergedAlerts = [
+    ...alerts,
+    ...webhookAlerts.filter(wa => !alerts.some(a => a.alertname === wa.alertname)),
+  ].sort((a, b) => b.timestamp - a.timestamp);
+
+  const activeAlerts = alerts.filter(a => a.state === 'active').length;
+  const mono = "'JetBrains Mono', 'Courier New', monospace";
+
+  const handleAlertClick = (alertName: string) => {
+    const match = investigations.find(i => i.alertName === alertName);
+    if (match) {
+      setSelectedId(match.id);
+      setTab('investigations');
+    }
+  };
+
+  const selected = selectedId ? investigations.find(i => i.id === selectedId) ?? null : null;
+
+  return (
+    <div style={{
+      width: '300px',
+      flexShrink: 0,
+      display: 'flex',
+      flexDirection: 'column',
+      background: '#0a1118',
+      borderLeft: '1px solid #1e2d3d',
+      overflow: 'hidden',
+      fontFamily: mono,
+    }}>
+      {/* Tab bar */}
+      <div style={{ display: 'flex', borderBottom: '1px solid #1e2d3d', flexShrink: 0 }}>
+        {(['alerts', 'investigations'] as const).map(t => {
+          const isActive = tab === t;
+          const badge = t === 'alerts' ? activeAlerts : (activeCount > 0 ? activeCount : null);
+          return (
+            <button
+              key={t}
+              onClick={() => setTab(t)}
+              style={{
+                flex: 1,
+                padding: '9px 6px',
+                background: isActive ? '#0d1520' : 'transparent',
+                border: 'none',
+                borderBottom: isActive ? '2px solid #3b82f6' : '2px solid transparent',
+                color: isActive ? '#e6edf3' : '#6b7280',
+                fontFamily: mono,
+                fontSize: '10px',
+                letterSpacing: '0.12em',
+                fontWeight: 600,
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '5px',
+              }}
+            >
+              {t === 'alerts' ? 'ALERTS' : 'INVESTIGATIONS'}
+              {badge != null && badge > 0 && (
+                <span style={{
+                  fontSize: '9px',
+                  padding: '1px 5px',
+                  borderRadius: '3px',
+                  background: t === 'investigations' && activeCount > 0
+                    ? 'rgba(59,130,246,0.15)' : 'rgba(239,68,68,0.15)',
+                  color: t === 'investigations' && activeCount > 0 ? '#3b82f6' : '#ef4444',
+                  border: `1px solid ${t === 'investigations' && activeCount > 0 ? 'rgba(59,130,246,0.3)' : 'rgba(239,68,68,0.3)'}`,
+                  animation: t === 'investigations' && activeCount > 0
+                    ? 'snapPulse 1.2s ease-in-out infinite alternate' : undefined,
+                }}>
+                  {badge}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* ALERTS tab */}
+      {tab === 'alerts' && (
+        <div style={{ flex: 1, overflowY: 'auto' }}>
+          {mergedAlerts.length === 0 ? (
+            <div style={{
+              padding: '20px 14px',
+              fontSize: '10px',
+              color: '#3fb950',
+              letterSpacing: '0.1em',
+              textAlign: 'center',
+            }}>
+              NO ALERTS — ALL SYSTEMS NOMINAL
+            </div>
+          ) : (
+            mergedAlerts.map(alert => {
+              const isWebhook = alert.id.startsWith('webhook-');
+              const color = severityColor(alert.severity, alert.state);
+              const hasInvestigation = investigations.some(i => i.alertName === alert.alertname);
+              return (
+                <div
+                  key={alert.id}
+                  onClick={() => handleAlertClick(alert.alertname)}
+                  style={{
+                    padding: '8px 12px',
+                    borderBottom: '1px solid #111c27',
+                    borderLeft: `3px solid ${color}`,
+                    cursor: hasInvestigation ? 'pointer' : 'default',
+                    background: 'transparent',
+                    transition: 'background 150ms ease',
+                  }}
+                  onMouseEnter={e => { if (hasInvestigation) (e.currentTarget as HTMLDivElement).style.background = 'rgba(255,255,255,0.03)'; }}
+                  onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.background = 'transparent'; }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '3px' }}>
+                    <span style={{ fontSize: '11px', color: '#e6edf3', fontWeight: 600 }}>{alert.alertname}</span>
+                    <span style={{ fontSize: '9px', color, letterSpacing: '0.1em' }}>
+                      {alert.state === 'resolved' ? 'RESOLVED' : alert.state === 'suppressed' ? 'SUPPRESSED' : 'FIRING'}
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontSize: '9px', color, letterSpacing: '0.08em' }}>
+                      [{alert.state === 'resolved' ? 'RESOLVED' : alert.severity.toUpperCase()}]
+                    </span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      {isWebhook && (
+                        <span style={{ fontSize: '8px', color: '#6b7280', letterSpacing: '0.06em', border: '1px solid #2d3748', padding: '0 3px', borderRadius: '2px' }}>WEBHOOK</span>
+                      )}
+                      {hasInvestigation && (
+                        <span style={{ fontSize: '9px', color: '#3b82f6', letterSpacing: '0.08em' }}>→ VIEW</span>
+                      )}
+                      <span style={{ fontSize: '9px', color: '#6b7280' }}>
+                        {new Date(alert.timestamp).toLocaleTimeString('en-US', { hour12: false })}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+      )}
+
+      {/* INVESTIGATIONS tab */}
+      {tab === 'investigations' && (
+        <>
+          <div style={{
+            padding: '4px 12px',
+            borderBottom: '1px solid #111c27',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '5px',
+            flexShrink: 0,
+          }}>
+            <span style={{
+              width: '5px', height: '5px', borderRadius: '50%',
+              background: sseConnected ? '#22c55e' : '#ef4444',
+              display: 'inline-block',
+            }} />
+            <span style={{ fontSize: '9px', color: '#6b7280', letterSpacing: '0.08em' }}>
+              {sseConnected ? 'LIVE' : 'DISCONNECTED'}
+            </span>
+          </div>
+
+          {selected ? (
+            <div style={{ flex: 1, overflowY: 'auto', padding: '10px 12px' }}>
+              <button
+                onClick={() => setSelectedId(null)}
+                style={{
+                  background: 'none', border: 'none', color: '#6b7280',
+                  fontFamily: mono, fontSize: '10px', cursor: 'pointer',
+                  padding: '0 0 8px 0', letterSpacing: '0.08em',
+                }}
+              >
+                ← BACK
+              </button>
+              <div style={{ fontSize: '12px', color: '#e6edf3', fontWeight: 600, marginBottom: '3px' }}>
+                {selected.alertName}
+              </div>
+              <div style={{ display: 'flex', gap: '6px', marginBottom: '10px', alignItems: 'center' }}>
+                <span style={{
+                  fontSize: '9px', padding: '1px 5px', borderRadius: '3px',
+                  background: `${severityColor(selected.severity)}22`,
+                  color: severityColor(selected.severity),
+                  border: `1px solid ${severityColor(selected.severity)}44`,
+                }}>
+                  {selected.severity.toUpperCase()}
+                </span>
+                <span style={{
+                  fontSize: '9px', color: invStatusColor(selected.status),
+                  animation: selected.status === 'INVESTIGATING'
+                    ? 'snapPulse 1.2s ease-in-out infinite alternate' : undefined,
+                }}>
+                  {selected.status}
+                </span>
+                <span style={{ fontSize: '9px', color: '#6b7280', marginLeft: 'auto' }}>
+                  {relativeTime(selected.startedAt)}
+                </span>
+              </div>
+              {[
+                { label: 'SYMPTOMS',     content: selected.symptoms,    accent: '#f97316' },
+                { label: 'EVIDENCE',     content: selected.evidence,    accent: '#eab308' },
+                { label: 'ROOT CAUSE',   content: selected.rootCause,   accent: '#ef4444' },
+                { label: 'PROPOSED FIX', content: selected.proposedFix, accent: '#22c55e' },
+              ].map(({ label, content, accent }) =>
+                content ? (
+                  <div key={label} style={{
+                    borderLeft: `3px solid ${accent}`,
+                    background: 'rgba(255,255,255,0.03)',
+                    borderRadius: '0 3px 3px 0',
+                    padding: '8px 10px',
+                    marginBottom: '8px',
+                  }}>
+                    <div style={{ fontSize: '9px', letterSpacing: '0.15em', color: accent, marginBottom: '5px', fontWeight: 600 }}>
+                      {label}
+                    </div>
+                    <div style={{ fontSize: '11px', color: '#c9d1d9', lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                      {content}
+                    </div>
+                  </div>
+                ) : null
+              )}
+            </div>
+          ) : (
+            <div style={{ flex: 1, overflowY: 'auto' }}>
+              {investigations.length === 0 ? (
+                <div style={{ padding: '20px 14px', fontSize: '10px', color: '#6b7280', letterSpacing: '0.1em', textAlign: 'center' }}>
+                  NO INVESTIGATIONS YET
+                </div>
+              ) : (
+                investigations.map(inv => (
+                  <div
+                    key={inv.id}
+                    onClick={() => setSelectedId(inv.id)}
+                    style={{
+                      padding: '8px 12px',
+                      borderBottom: '1px solid #111c27',
+                      borderLeft: `3px solid ${invStatusColor(inv.status)}`,
+                      cursor: 'pointer',
+                      background: 'transparent',
+                      transition: 'background 150ms ease',
+                    }}
+                    onMouseEnter={e => { (e.currentTarget as HTMLDivElement).style.background = 'rgba(255,255,255,0.03)'; }}
+                    onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.background = 'transparent'; }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '3px' }}>
+                      <span style={{ fontSize: '11px', color: '#e6edf3', fontWeight: 600 }}>{inv.alertName}</span>
+                      <span style={{
+                        fontSize: '9px', padding: '1px 5px', borderRadius: '3px',
+                        background: `${severityColor(inv.severity)}22`,
+                        color: severityColor(inv.severity),
+                        border: `1px solid ${severityColor(inv.severity)}44`,
+                      }}>
+                        {inv.severity.toUpperCase()}
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{
+                        fontSize: '9px',
+                        color: invStatusColor(inv.status),
+                        letterSpacing: '0.1em',
+                        animation: inv.status === 'INVESTIGATING'
+                          ? 'snapPulse 1.2s ease-in-out infinite alternate' : undefined,
+                      }}>
+                        {inv.status}
+                      </span>
+                      <span style={{ fontSize: '9px', color: '#6b7280' }}>{relativeTime(inv.startedAt)}</span>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // App — main layout
 // ---------------------------------------------------------------------------
 
 export default function App() {
   const { services, heapMB, alerts, lastPoll } = useCommandRoom();
+  const { investigations, activeInvestigationCount, sseConnected, webhookAlerts } = useInvestigations();
 
   const upCount = Object.values(services).filter(s => s.status === 'UP').length;
   const totalCount = Object.values(services).length;
@@ -1335,10 +1765,16 @@ export default function App() {
         </div>
       </header>
 
-      {/* Main content: SVG map + alert panel */}
+      {/* Main content: SVG map + alert panel + investigation sidebar */}
       <div className="main-layout">
-        <HexMap services={services} alerts={alerts} />
-        <AlertPanel alerts={alerts} />
+        <HexMap services={services} alerts={alerts} activeInvestigationCount={activeInvestigationCount} />
+        <CommandSidebar
+          alerts={alerts}
+          webhookAlerts={webhookAlerts}
+          investigations={investigations}
+          activeCount={activeInvestigationCount}
+          sseConnected={sseConnected}
+        />
       </div>
 
       {/* Bottom status bar */}

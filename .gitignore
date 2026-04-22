@@ -22,6 +22,9 @@ build/
 *.ipr
 out/
 
+# --- IDE — VS Code ---
+.vscode/
+
 # --- Logs ---
 *.log
 *.log.*.gz

@@ -1,0 +1,14 @@
+alertName: HighHeapUsage
+title: High JVM Heap Memory Usage
+severity: critical
+description: >
+  JVM heap usage has exceeded the warning threshold. This typically indicates a memory
+  leak, unbounded caching, or an unexpected surge in object allocation rate.
+steps:
+  - Check recent deployments for new code allocating large or long-lived data structures
+  - Call the dynamic profiler to identify which methods are allocating the most memory
+  - Look for unclosed resources such as streams, connections, or listeners
+  - Check if /chaos/leak was recently triggered — the static memoryLeakList is the culprit
+  - Review GC logs for frequency and duration of full GC events
+  - If legitimate load increase, consider increasing -Xmx; otherwise find and patch the leak
+  - Proposed fix should clear the static memoryLeakList or remove the leaking code path

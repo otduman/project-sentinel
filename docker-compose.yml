@@ -2,8 +2,8 @@
 #
 # Runs the full observability stack: Prometheus (scraping + alerting),
 # AlertManager (alert routing), and Grafana (dashboards).
-# lab-rat (Spring Boot) runs on the host machine, not in a container,
-# which is why Prometheus targets host.docker.internal:8080.
+# lab-rat, sentinel-agent, and sentinel-dashboard all run as containers
+# on the shared sentinel-net Docker network.
 
 services:
 
@@ -29,6 +29,8 @@ services:
       - '--web.enable-lifecycle'
     depends_on:
       - alertmanager
+    networks:
+      - sentinel-net
 
   # ---------------------------------------------------------------------------
   # AlertManager
@@ -46,6 +48,8 @@ services:
       - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml
     command:
       - '--config.file=/etc/alertmanager/alertmanager.yml'
+    networks:
+      - sentinel-net
 
   # ---------------------------------------------------------------------------
   # Grafana
@@ -59,7 +63,85 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_USER=${GF_SECURITY_ADMIN_USER}
+      - GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD}
     depends_on:
       - prometheus
+    networks:
+      - sentinel-net
+
+  # ---------------------------------------------------------------------------
+  # Postgres
+  # Optional persistent database for sentinel-agent investigations.
+  # Activate with: SPRING_PROFILES_ACTIVE=postgres (set in .env)
+  # H2 in-memory is the default — Postgres is only needed for data durability
+  # across agent restarts or for multi-instance deployments.
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: sentinel-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=sentinel
+      - POSTGRES_USER=${DB_USERNAME}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+    volumes:
+      - sentinel-postgres-data:/var/lib/postgresql/data
+    networks:
+      - sentinel-net
+
+  lab-rat:
+    build:
+      context: .
+      dockerfile: lab-rat/Dockerfile
+    container_name: sentinel-lab-rat
+    ports:
+      - "8080:8080"
+    volumes:
+      - lab-rat-logs:/logs
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+    networks:
+      - sentinel-net
+
+  sentinel-agent:
+    build:
+      context: .
+      dockerfile: sentinel-agent/Dockerfile
+    container_name: sentinel-agent
+    ports:
+      - "8081:8081"
+    volumes:
+      - lab-rat-logs:/logs
+    env_file:
+      - .env
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker,postgres
+    depends_on:
+      - postgres
+      - lab-rat
+    networks:
+      - sentinel-net
+    # Uncomment on Linux to enable JVM profiling across containers:
+    # pid: "host"
+
+  sentinel-dashboard:
+    build:
+      context: sentinel-dashboard
+      dockerfile: Dockerfile
+    container_name: sentinel-dashboard
+    ports:
+      - "5173:80"
+    depends_on:
+      - sentinel-agent
+    networks:
+      - sentinel-net
+
+volumes:
+  sentinel-postgres-data:
+  lab-rat-logs:
+
+networks:
+  sentinel-net:
+    driver: bridge
