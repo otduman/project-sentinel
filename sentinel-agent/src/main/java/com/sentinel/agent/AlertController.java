@@ -1,6 +1,8 @@
 package com.sentinel.agent;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.task.TaskExecutor;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;
@@ -11,6 +13,9 @@ import java.util.Map;
 @RestController
 @RequestMapping("/webhook/prometheus")
 public class AlertController {
+
+    @Value("${agent.webhook.secret:}")
+    private String webhookSecret;
 
     private final SreAgent sreAgent;
     private final TaskExecutor investigationExecutor;
@@ -25,13 +30,20 @@ public class AlertController {
     }
 
     @PostMapping
-    public void receiveAlert(@RequestBody Map<String, Object> payload) {
+    public ResponseEntity<Void> receiveAlert(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @RequestBody Map<String, Object> payload) {
+
+        if (!webhookSecret.isBlank() && !("Bearer " + webhookSecret).equals(authHeader)) {
+            return ResponseEntity.status(401).build();
+        }
+
         System.out.println("Received Prometheus AlertManager Webhook");
 
         String status = (String) payload.get("status");
         if (!"firing".equals(status)) {
             System.out.println("[Sentinel] Alert status: " + status + ". Ignoring.");
-            return;
+            return ResponseEntity.ok().build();
         }
 
         System.out.println("[Sentinel] Alert is FIRING. Dispatching AI SRE...");
@@ -59,6 +71,8 @@ public class AlertController {
                 investigationService.fail(investigation.getId(), e.getMessage());
             }
         });
+
+        return ResponseEntity.ok().build();
     }
 
     // AlertManager webhook v4 payload structure:

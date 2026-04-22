@@ -12,10 +12,14 @@ RUN gradle :lab-rat:bootJar --no-daemon -x test
 FROM eclipse-temurin:21-jre-alpine
 WORKDIR /app
 
-# Create log directory (mounted as a shared Docker volume)
-RUN mkdir -p /logs
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup \
+    && mkdir -p /logs && chown appuser:appgroup /logs
 
 COPY --from=builder /build/lab-rat/build/libs/*.jar app.jar
+
+RUN chown appuser:appgroup app.jar
+
+USER appuser
 
 EXPOSE 8080
 ENTRYPOINT ["java", "-jar", "app.jar"]
