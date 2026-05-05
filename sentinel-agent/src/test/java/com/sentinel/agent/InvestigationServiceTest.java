@@ -43,13 +43,15 @@ class InvestigationServiceTest {
 
     @Test
     void start_persistsPendingInvestigation() {
+        when(repository.findFirstByAlertNameAndStartedAtAfterOrderByStartedAtDesc(
+                eq("HighCpuAlert"), any(java.time.Instant.class))).thenReturn(Optional.empty());
         when(repository.save(any(Investigation.class))).thenAnswer(inv -> {
             Investigation arg = inv.getArgument(0);
             arg.setId(id);
             return arg;
         });
 
-        Investigation result = service.start("HighCpuAlert", "critical");
+        InvestigationService.StartResult result = service.start("HighCpuAlert", "critical");
 
         ArgumentCaptor<Investigation> captor = ArgumentCaptor.forClass(Investigation.class);
         verify(repository).save(captor.capture());
@@ -59,7 +61,25 @@ class InvestigationServiceTest {
         assertThat(saved.getAlertName()).isEqualTo("HighCpuAlert");
         assertThat(saved.getSeverity()).isEqualTo("critical");
         assertThat(saved.getStartedAt()).isNotNull();
-        assertThat(result.getId()).isEqualTo(id);
+        assertThat(result.investigation().getId()).isEqualTo(id);
+        assertThat(result.wasReused()).isFalse();
+    }
+
+    @Test
+    void start_reusesRecentInvestigationForSameAlert() {
+        // A still-firing alert re-sent by AlertManager at its repeat_interval must
+        // not spawn a second investigation row — the existing one should be reused.
+        Investigation existing = Investigation.create("HighCpuAlert", "critical");
+        existing.setId(id);
+        when(repository.findFirstByAlertNameAndStartedAtAfterOrderByStartedAtDesc(
+                eq("HighCpuAlert"), any(java.time.Instant.class)))
+                .thenReturn(Optional.of(existing));
+
+        InvestigationService.StartResult result = service.start("HighCpuAlert", "critical");
+
+        assertThat(result.wasReused()).isTrue();
+        assertThat(result.investigation()).isSameAs(existing);
+        verify(repository, never()).save(any(Investigation.class));
     }
 
     // -------------------------------------------------------------------------

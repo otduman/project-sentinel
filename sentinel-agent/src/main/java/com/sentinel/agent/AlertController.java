@@ -58,9 +58,17 @@ public class AlertController {
                 + " | Severity: " + severity
                 + (summary.isEmpty() ? "" : " | Summary: " + summary);
 
-        // Persist the investigation immediately so the dashboard can show it as PENDING.
-        Investigation investigation = investigationService.start(alertName, severity);
+        // Persist (or reuse) the investigation. AlertManager re-sends still-firing
+        // alerts at its repeat_interval; the dedupe inside InvestigationService.start
+        // collapses those repeats onto a single investigation row.
+        InvestigationService.StartResult startResult = investigationService.start(alertName, severity);
+        if (startResult.wasReused()) {
+            System.out.println("[Sentinel] Webhook is a continuation of investigation "
+                    + startResult.investigation().getId() + " — skipping AI dispatch.");
+            return ResponseEntity.ok().build();
+        }
 
+        Investigation investigation = startResult.investigation();
         investigationExecutor.execute(() -> {
             try {
                 String result = sreAgent.investigate(investigation.getId().toString(), incidentDescription);

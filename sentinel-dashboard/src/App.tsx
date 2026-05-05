@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1437,41 +1439,140 @@ function invStatusColor(status: Investigation['status']): string {
   return '#6b7280';
 }
 
+// ReportMarkdown — renders investigation report sections (symptoms, evidence,
+// rootCause, proposedFix) with proper markdown formatting (headings, lists,
+// inline code, fenced code blocks, bold/italic) instead of raw text. The agent
+// emits Gemini-flavoured markdown which is unreadable when shown verbatim.
+//
+// All styles use accent colors that match the surrounding section card so the
+// visual hierarchy stays consistent with the rest of the dashboard.
+function ReportMarkdown({ source, accent }: { source: string; accent: string }) {
+  return (
+    <div style={{ fontSize: '11px', color: '#c9d1d9', lineHeight: 1.55, wordBreak: 'break-word' }}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          p: ({ children }) => (
+            <p style={{ margin: '0 0 6px 0' }}>{children}</p>
+          ),
+          h1: ({ children }) => (
+            <div style={{ fontSize: '10px', letterSpacing: '0.12em', color: accent, margin: '8px 0 4px 0', fontWeight: 600, textTransform: 'uppercase' }}>{children}</div>
+          ),
+          h2: ({ children }) => (
+            <div style={{ fontSize: '10px', letterSpacing: '0.12em', color: accent, margin: '8px 0 4px 0', fontWeight: 600, textTransform: 'uppercase' }}>{children}</div>
+          ),
+          h3: ({ children }) => (
+            <div style={{ fontSize: '10px', letterSpacing: '0.1em', color: accent, margin: '6px 0 3px 0', fontWeight: 600 }}>{children}</div>
+          ),
+          ul: ({ children }) => (
+            <ul style={{ margin: '0 0 6px 0', paddingLeft: '16px' }}>{children}</ul>
+          ),
+          ol: ({ children }) => (
+            <ol style={{ margin: '0 0 6px 0', paddingLeft: '18px' }}>{children}</ol>
+          ),
+          li: ({ children }) => (
+            <li style={{ margin: '2px 0' }}>{children}</li>
+          ),
+          strong: ({ children }) => (
+            <strong style={{ color: '#e6edf3', fontWeight: 600 }}>{children}</strong>
+          ),
+          em: ({ children }) => (
+            <em style={{ color: '#e6edf3' }}>{children}</em>
+          ),
+          a: ({ children, href }) => (
+            <a href={href} target="_blank" rel="noreferrer" style={{ color: accent, textDecoration: 'underline' }}>{children}</a>
+          ),
+          code: ({ className, children, ...props }) => {
+            // react-markdown emits inline `code` (no className) and block `code`
+            // (with language-xxx className) through the same component slot.
+            const isBlock = (className ?? '').startsWith('language-');
+            if (isBlock) {
+              return (
+                <code className={className} style={{ fontFamily: 'JetBrains Mono, Consolas, monospace', fontSize: '10.5px' }} {...props}>
+                  {children}
+                </code>
+              );
+            }
+            return (
+              <code style={{
+                fontFamily: 'JetBrains Mono, Consolas, monospace',
+                fontSize: '10.5px',
+                color: accent,
+                background: 'rgba(255,255,255,0.04)',
+                border: '1px solid rgba(255,255,255,0.06)',
+                padding: '0 4px',
+                borderRadius: '2px',
+              }}>
+                {children}
+              </code>
+            );
+          },
+          pre: ({ children }) => (
+            <pre style={{
+              margin: '6px 0',
+              padding: '8px 10px',
+              background: 'rgba(0,0,0,0.35)',
+              border: '1px solid rgba(255,255,255,0.06)',
+              borderRadius: '3px',
+              overflowX: 'auto',
+              color: '#c9d1d9',
+            }}>
+              {children}
+            </pre>
+          ),
+          blockquote: ({ children }) => (
+            <blockquote style={{
+              margin: '4px 0',
+              padding: '2px 0 2px 10px',
+              borderLeft: `2px solid ${accent}66`,
+              color: '#9aa5b1',
+            }}>
+              {children}
+            </blockquote>
+          ),
+          table: ({ children }) => (
+            <table style={{ borderCollapse: 'collapse', margin: '6px 0', fontSize: '10.5px' }}>{children}</table>
+          ),
+          th: ({ children }) => (
+            <th style={{ border: '1px solid rgba(255,255,255,0.1)', padding: '3px 6px', textAlign: 'left', color: '#e6edf3' }}>{children}</th>
+          ),
+          td: ({ children }) => (
+            <td style={{ border: '1px solid rgba(255,255,255,0.1)', padding: '3px 6px' }}>{children}</td>
+          ),
+          hr: () => (
+            <hr style={{ border: 'none', borderTop: '1px solid rgba(255,255,255,0.08)', margin: '8px 0' }} />
+          ),
+        }}
+      >
+        {source}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
 interface CommandSidebarProps {
   alerts: AlertEntry[];
-  webhookAlerts: AlertEntry[];
   investigations: Investigation[];
   activeCount: number;
   sseConnected: boolean;
 }
 
-function CommandSidebar({ alerts, webhookAlerts, investigations, activeCount, sseConnected }: CommandSidebarProps) {
-  const [tab, setTab] = useState<'alerts' | 'investigations'>('alerts');
+function CommandSidebar({ alerts, investigations, activeCount, sseConnected }: CommandSidebarProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
-
-  // Merge polled alerts with webhook-sourced ones, deduplicating by alertname.
-  // Real polled alerts take priority; webhook synthetics fill in the gaps.
-  const mergedAlerts = [
-    ...alerts,
-    ...webhookAlerts.filter(wa => !alerts.some(a => a.alertname === wa.alertname)),
-  ].sort((a, b) => b.timestamp - a.timestamp);
-
-  const activeAlerts = alerts.filter(a => a.state === 'active').length;
   const mono = "'JetBrains Mono', 'Courier New', monospace";
 
-  const handleAlertClick = (alertName: string) => {
-    const match = investigations.find(i => i.alertName === alertName);
-    if (match) {
-      setSelectedId(match.id);
-      setTab('investigations');
-    }
-  };
+  // AlertManager state — surfaced as a compact pill at the top instead of a full
+  // parallel sidebar. The investigations list below is the single source of truth
+  // for incident history; the pill exists only to make it obvious when something
+  // is firing upstream that hasn't (yet) produced an investigation row.
+  const firingCount = alerts.filter(a => a.state === 'active').length;
+  const silencedCount = alerts.filter(a => a.state === 'suppressed').length;
 
   const selected = selectedId ? investigations.find(i => i.id === selectedId) ?? null : null;
 
   return (
     <div style={{
-      width: '300px',
+      width: '420px',
       flexShrink: 0,
       display: 'flex',
       flexDirection: 'column',
@@ -1480,137 +1581,68 @@ function CommandSidebar({ alerts, webhookAlerts, investigations, activeCount, ss
       overflow: 'hidden',
       fontFamily: mono,
     }}>
-      {/* Tab bar */}
-      <div style={{ display: 'flex', borderBottom: '1px solid #1e2d3d', flexShrink: 0 }}>
-        {(['alerts', 'investigations'] as const).map(t => {
-          const isActive = tab === t;
-          const badge = t === 'alerts' ? activeAlerts : (activeCount > 0 ? activeCount : null);
-          return (
-            <button
-              key={t}
-              onClick={() => setTab(t)}
-              style={{
-                flex: 1,
-                padding: '9px 6px',
-                background: isActive ? '#0d1520' : 'transparent',
-                border: 'none',
-                borderBottom: isActive ? '2px solid #3b82f6' : '2px solid transparent',
-                color: isActive ? '#e6edf3' : '#6b7280',
-                fontFamily: mono,
-                fontSize: '10px',
-                letterSpacing: '0.12em',
-                fontWeight: 600,
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: '5px',
-              }}
-            >
-              {t === 'alerts' ? 'ALERTS' : 'INVESTIGATIONS'}
-              {badge != null && badge > 0 && (
-                <span style={{
-                  fontSize: '9px',
-                  padding: '1px 5px',
-                  borderRadius: '3px',
-                  background: t === 'investigations' && activeCount > 0
-                    ? 'rgba(59,130,246,0.15)' : 'rgba(239,68,68,0.15)',
-                  color: t === 'investigations' && activeCount > 0 ? '#3b82f6' : '#ef4444',
-                  border: `1px solid ${t === 'investigations' && activeCount > 0 ? 'rgba(59,130,246,0.3)' : 'rgba(239,68,68,0.3)'}`,
-                  animation: t === 'investigations' && activeCount > 0
-                    ? 'snapPulse 1.2s ease-in-out infinite alternate' : undefined,
-                }}>
-                  {badge}
-                </span>
-              )}
-            </button>
-          );
-        })}
-      </div>
-
-      {/* ALERTS tab */}
-      {tab === 'alerts' && (
-        <div style={{ flex: 1, overflowY: 'auto' }}>
-          {mergedAlerts.length === 0 ? (
-            <div style={{
-              padding: '20px 14px',
-              fontSize: '10px',
-              color: '#3fb950',
-              letterSpacing: '0.1em',
-              textAlign: 'center',
+      {/* Header — INCIDENTS title, live SSE dot, AlertManager pill */}
+      <div style={{
+        padding: '10px 12px 9px 12px',
+        borderBottom: '1px solid #1e2d3d',
+        flexShrink: 0,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '6px',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <span style={{ fontSize: '11px', color: '#e6edf3', letterSpacing: '0.18em', fontWeight: 600 }}>
+            INCIDENTS
+          </span>
+          {activeCount > 0 && (
+            <span style={{
+              fontSize: '9px',
+              padding: '1px 5px',
+              borderRadius: '3px',
+              background: 'rgba(59,130,246,0.15)',
+              color: '#3b82f6',
+              border: '1px solid rgba(59,130,246,0.3)',
+              animation: 'snapPulse 1.2s ease-in-out infinite alternate',
             }}>
-              NO ALERTS — ALL SYSTEMS NOMINAL
-            </div>
-          ) : (
-            mergedAlerts.map(alert => {
-              const isWebhook = alert.id.startsWith('webhook-');
-              const color = severityColor(alert.severity, alert.state);
-              const hasInvestigation = investigations.some(i => i.alertName === alert.alertname);
-              return (
-                <div
-                  key={alert.id}
-                  onClick={() => handleAlertClick(alert.alertname)}
-                  style={{
-                    padding: '8px 12px',
-                    borderBottom: '1px solid #111c27',
-                    borderLeft: `3px solid ${color}`,
-                    cursor: hasInvestigation ? 'pointer' : 'default',
-                    background: 'transparent',
-                    transition: 'background 150ms ease',
-                  }}
-                  onMouseEnter={e => { if (hasInvestigation) (e.currentTarget as HTMLDivElement).style.background = 'rgba(255,255,255,0.03)'; }}
-                  onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.background = 'transparent'; }}
-                >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '3px' }}>
-                    <span style={{ fontSize: '11px', color: '#e6edf3', fontWeight: 600 }}>{alert.alertname}</span>
-                    <span style={{ fontSize: '9px', color, letterSpacing: '0.1em' }}>
-                      {alert.state === 'resolved' ? 'RESOLVED' : alert.state === 'suppressed' ? 'SUPPRESSED' : 'FIRING'}
-                    </span>
-                  </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span style={{ fontSize: '9px', color, letterSpacing: '0.08em' }}>
-                      [{alert.state === 'resolved' ? 'RESOLVED' : alert.severity.toUpperCase()}]
-                    </span>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      {isWebhook && (
-                        <span style={{ fontSize: '8px', color: '#6b7280', letterSpacing: '0.06em', border: '1px solid #2d3748', padding: '0 3px', borderRadius: '2px' }}>WEBHOOK</span>
-                      )}
-                      {hasInvestigation && (
-                        <span style={{ fontSize: '9px', color: '#3b82f6', letterSpacing: '0.08em' }}>→ VIEW</span>
-                      )}
-                      <span style={{ fontSize: '9px', color: '#6b7280' }}>
-                        {new Date(alert.timestamp).toLocaleTimeString('en-US', { hour12: false })}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              );
-            })
+              {activeCount} ACTIVE
+            </span>
           )}
-        </div>
-      )}
-
-      {/* INVESTIGATIONS tab */}
-      {tab === 'investigations' && (
-        <>
-          <div style={{
-            padding: '4px 12px',
-            borderBottom: '1px solid #111c27',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '5px',
-            flexShrink: 0,
-          }}>
+          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '4px' }}>
             <span style={{
               width: '5px', height: '5px', borderRadius: '50%',
               background: sseConnected ? '#22c55e' : '#ef4444',
               display: 'inline-block',
             }} />
             <span style={{ fontSize: '9px', color: '#6b7280', letterSpacing: '0.08em' }}>
-              {sseConnected ? 'LIVE' : 'DISCONNECTED'}
+              {sseConnected ? 'LIVE' : 'OFF'}
             </span>
           </div>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '9px', letterSpacing: '0.08em' }}>
+          <a
+            href="http://localhost:9093"
+            target="_blank"
+            rel="noreferrer"
+            title="Open AlertManager"
+            style={{
+              color: firingCount > 0 ? '#ef4444' : '#6b7280',
+              textDecoration: 'none',
+              border: `1px solid ${firingCount > 0 ? 'rgba(239,68,68,0.3)' : '#1e2d3d'}`,
+              padding: '1px 6px',
+              borderRadius: '3px',
+              background: firingCount > 0 ? 'rgba(239,68,68,0.08)' : 'transparent',
+              fontWeight: firingCount > 0 ? 600 : 400,
+            }}
+          >
+            {firingCount} FIRING
+          </a>
+          <span style={{ color: silencedCount > 0 ? '#9ca3af' : '#6b7280' }}>
+            · {silencedCount} SILENCED
+          </span>
+        </div>
+      </div>
 
+      <>
           {selected ? (
             <div style={{ flex: 1, overflowY: 'auto', padding: '10px 12px' }}>
               <button
@@ -1663,9 +1695,7 @@ function CommandSidebar({ alerts, webhookAlerts, investigations, activeCount, ss
                     <div style={{ fontSize: '9px', letterSpacing: '0.15em', color: accent, marginBottom: '5px', fontWeight: 600 }}>
                       {label}
                     </div>
-                    <div style={{ fontSize: '11px', color: '#c9d1d9', lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                      {content}
-                    </div>
+                    <ReportMarkdown source={content} accent={accent} />
                   </div>
                 ) : null
               )}
@@ -1721,7 +1751,6 @@ function CommandSidebar({ alerts, webhookAlerts, investigations, activeCount, ss
             </div>
           )}
         </>
-      )}
     </div>
   );
 }
@@ -1732,7 +1761,7 @@ function CommandSidebar({ alerts, webhookAlerts, investigations, activeCount, ss
 
 export default function App() {
   const { services, heapMB, alerts, lastPoll } = useCommandRoom();
-  const { investigations, activeInvestigationCount, sseConnected, webhookAlerts } = useInvestigations();
+  const { investigations, activeInvestigationCount, sseConnected } = useInvestigations();
 
   const upCount = Object.values(services).filter(s => s.status === 'UP').length;
   const totalCount = Object.values(services).length;
@@ -1770,7 +1799,6 @@ export default function App() {
         <HexMap services={services} alerts={alerts} activeInvestigationCount={activeInvestigationCount} />
         <CommandSidebar
           alerts={alerts}
-          webhookAlerts={webhookAlerts}
           investigations={investigations}
           activeCount={activeInvestigationCount}
           sseConnected={sseConnected}

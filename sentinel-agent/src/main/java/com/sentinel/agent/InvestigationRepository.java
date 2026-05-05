@@ -4,6 +4,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -29,4 +30,14 @@ public interface InvestigationRepository extends JpaRepository<Investigation, UU
      */
     List<Investigation> findByAlertNameAndStatusAndStartedAtAfterOrderByStartedAtDesc(
             String alertName, String status, java.time.Instant since);
+
+    /**
+     * Returns the most recent investigation for the given alert name started after
+     * the cutoff, regardless of status. Used by {@code InvestigationService.start}
+     * to dedupe webhook bursts: AlertManager re-sends the same firing alert every
+     * {@code repeat_interval} (5 min by default) while it remains active, and
+     * without dedupe each re-send would create a fresh investigation row.
+     */
+    Optional<Investigation> findFirstByAlertNameAndStartedAtAfterOrderByStartedAtDesc(
+            String alertName, Instant since);
 }

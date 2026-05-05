@@ -92,7 +92,7 @@ class AlertControllerIntegrationTest {
     @Test
     void firingAlert_triggersInvestigationStart() throws Exception {
         when(investigationService.start(eq("HighCpuAlert"), eq("critical")))
-                .thenReturn(persisted("HighCpuAlert", "critical"));
+                .thenReturn(new InvestigationService.StartResult(persisted("HighCpuAlert", "critical"), false));
         // Run the executor task synchronously so we can verify downstream calls deterministically.
         doAnswer(inv -> {
             ((Runnable) inv.getArgument(0)).run();
@@ -153,7 +153,7 @@ class AlertControllerIntegrationTest {
     @Test
     void correctBearerToken_returns200() throws Exception {
         when(investigationService.start(anyString(), anyString()))
-                .thenReturn(persisted("HighCpuAlert", "critical"));
+                .thenReturn(new InvestigationService.StartResult(persisted("HighCpuAlert", "critical"), false));
         doAnswer(inv -> {
             ((Runnable) inv.getArgument(0)).run();
             return null;

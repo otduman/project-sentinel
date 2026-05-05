@@ -32,9 +32,17 @@ public class InvestigationService {
     // Matches section headers produced by Gemini in its free-text reports.
     // Handles bold (**), heading (#), and plain variants, with or without trailing colon.
     private static final Pattern SECTION = Pattern.compile(
-            "(?i)(?:\\*{1,2}|#{1,3}\\s*)?(Symptoms|Evidence|Root\\s*Cause|Proposed\\s*Fix)(?:\\*{1,2})?\\s*:?\\s*",
-            Pattern.CASE_INSENSITIVE
+            "^[ \t]*(?:\\*{1,2}|#{1,3}\\s*)?(Symptoms|Evidence|Root\\s*Cause|Proposed\\s*Fix)(?:\\*{1,2})?\\s*:?\\s*",
+            Pattern.CASE_INSENSITIVE | Pattern.MULTILINE
     );
+
+    /**
+     * How long after a firing webhook to treat subsequent webhooks for the same
+     * alertName as duplicates. AlertManager's default {@code repeat_interval}
+     * is 5 minutes; 10 covers that with a margin so a still-firing alert never
+     * spawns a second investigation row.
+     */
+    private static final java.time.Duration DEDUP_WINDOW = java.time.Duration.ofMinutes(10);
 
     private final InvestigationRepository repository;
     private final BudgetedChatModel budgetedChatModel;
@@ -42,6 +50,13 @@ public class InvestigationService {
 
     // Thread-safe list of active SSE connections.
     private final List<SseEmitter> emitters = new CopyOnWriteArrayList<>();
+
+    /**
+     * Outcome of {@link #start(String, String)} — either a brand-new investigation
+     * was created, or an existing recent one was reused because the webhook is a
+     * continuation of an already-active alert.
+     */
+    public record StartResult(Investigation investigation, boolean wasReused) {}
 
     public InvestigationService(InvestigationRepository repository,
                                 dev.langchain4j.model.chat.ChatModel chatModel) {
@@ -64,13 +79,32 @@ public class InvestigationService {
     // -------------------------------------------------------------------------
 
     /**
-     * Persists a new PENDING investigation and notifies subscribers.
+     * Resolves the appropriate investigation for an incoming firing-alert webhook:
+     * either creates a new PENDING investigation (notifying subscribers), or
+     * returns the most recent investigation for the same alertName started within
+     * {@link #DEDUP_WINDOW}. The latter case prevents duplicate rows when
+     * AlertManager re-sends a still-firing alert at its {@code repeat_interval}.
+     *
+     * @return a {@link StartResult} where {@code wasReused == true} signals to the
+     *         caller (typically {@code AlertController}) that no AI dispatch should
+     *         be triggered — the existing investigation is already handling this
+     *         alert episode.
      */
-    public Investigation start(String alertName, String severity) {
+    public StartResult start(String alertName, String severity) {
+        Instant cutoff = Instant.now().minus(DEDUP_WINDOW);
+        Optional<Investigation> recent =
+                repository.findFirstByAlertNameAndStartedAtAfterOrderByStartedAtDesc(alertName, cutoff);
+        if (recent.isPresent()) {
+            Investigation existing = recent.get();
+            System.out.println("[Sentinel] Deduped webhook for alert='" + alertName
+                    + "' — reusing investigation " + existing.getId()
+                    + " (status=" + existing.getStatus() + ")");
+            return new StartResult(existing, true);
+        }
         Investigation inv = Investigation.create(alertName, severity);
         inv = repository.save(inv);
         broadcast("investigation_started", inv);
-        return inv;
+        return new StartResult(inv, false);
     }
 
     /**
@@ -274,13 +308,23 @@ public class InvestigationService {
                     ? findHeaderStart(rawReport, starts.get(i + 1))
                     : rawReport.length();
 
-            String section = rawReport.substring(from, end).trim();
+            String section = stripStrayHashLines(rawReport.substring(from, end)).trim();
             if (!section.isBlank()) {
                 result.put(keys.get(i), section);
             }
         }
 
         return result;
+    }
+
+    /**
+     * Removes standalone heading-marker lines (e.g. lines containing only "#" /
+     * "##" / "###" with optional whitespace) that Gemini occasionally emits
+     * between section bodies. These would otherwise render as empty headings or
+     * literal "#" characters depending on the consumer's rendering layer.
+     */
+    private String stripStrayHashLines(String section) {
+        return section.replaceAll("(?m)^\\s*#{1,6}\\s*$", "");
     }
 
     /**
