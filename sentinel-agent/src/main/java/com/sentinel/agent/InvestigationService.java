@@ -37,13 +37,18 @@ public class InvestigationService {
     );
 
     private final InvestigationRepository repository;
+    private final BudgetedChatModel budgetedChatModel;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     // Thread-safe list of active SSE connections.
     private final List<SseEmitter> emitters = new CopyOnWriteArrayList<>();
 
-    public InvestigationService(InvestigationRepository repository) {
+    public InvestigationService(InvestigationRepository repository,
+                                dev.langchain4j.model.chat.ChatModel chatModel) {
         this.repository = repository;
+        // The Spring ChatModel bean is wrapped by BudgetedChatModel — downcast so we
+        // can release per-memory-id token counters when an investigation terminates.
+        this.budgetedChatModel = (chatModel instanceof BudgetedChatModel b) ? b : null;
     }
 
     @PreDestroy
@@ -83,6 +88,7 @@ public class InvestigationService {
             inv.setStatus("COMPLETE");
             inv.setCompletedAt(Instant.now());
             Investigation saved = repository.save(inv);
+            releaseBudget(id.toString());
             broadcast("investigation_complete", saved);
         });
     }
@@ -98,8 +104,20 @@ public class InvestigationService {
             // Store the error message in symptoms so the dashboard can display it.
             inv.setSymptoms("Investigation failed: " + error);
             Investigation saved = repository.save(inv);
+            releaseBudget(id.toString());
             broadcast("investigation_failed", saved);
         });
+    }
+
+    /**
+     * Releases the per-investigation token-budget counter held by
+     * {@link BudgetedChatModel}. No-op if the wrapper isn't installed
+     * (e.g. tests that bypass it).
+     */
+    private void releaseBudget(String memoryId) {
+        if (budgetedChatModel != null) {
+            budgetedChatModel.removeBudget(memoryId);
+        }
     }
 
     // -------------------------------------------------------------------------

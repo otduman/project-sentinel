@@ -16,57 +16,41 @@ Project Sentinel is an autonomous AI Site Reliability Engineer. It monitors a Sp
 
 ## Prerequisites
 
-- Java 21+
-- Gradle 8+
-- Node.js 18+ and npm 9+
-- Docker Desktop (for the observability stack)
+- Docker Desktop (or any Docker Engine + Compose v2)
 - A [Google Gemini API key](https://aistudio.google.com/app/apikey)
+
+For local Java/Node development outside Docker:
+- Java 21+
+- Gradle 8+ (wrapper provided)
+- Node.js 18+ and npm 9+
 
 ## Setup
 
 ```bash
-git clone https://github.com/your-org/project-sentinel.git
+git clone https://github.com/<your-fork>/project-sentinel.git
 cd project-sentinel
-```
-
-Copy the environment template and add your Gemini key:
-
-```bash
 cp .env.example .env
-# Edit .env and set GEMINI_API_KEY=your_actual_key
-```
-
-Build the Java modules:
-
-```bash
-./gradlew build
+# Edit .env: set GEMINI_API_KEY, DB credentials, Grafana credentials
 ```
 
 ## Running
 
-**1. Start the observability stack (Prometheus, AlertManager, Grafana):**
+The full stack — lab-rat, sentinel-agent, sentinel-dashboard, Prometheus, AlertManager, Grafana, and Postgres — runs from a single Compose command:
 
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
 
-**2. Start lab-rat and sentinel-agent:**
+Endpoints once everything is healthy:
 
-```powershell
-.\run.ps1
-```
-
-This opens two terminal windows — one per Java service. lab-rat starts on port 8080 and sentinel-agent on port 8081.
-
-**3. Start the dashboard:**
-
-```bash
-cd sentinel-dashboard
-npm install
-npm run dev
-```
-
-Open `http://localhost:5173`.
+| URL | Service |
+|---|---|
+| http://localhost:5173 | sentinel-dashboard (React) |
+| http://localhost:8081 | sentinel-agent API + SSE |
+| http://localhost:8080 | lab-rat |
+| http://localhost:9090 | Prometheus |
+| http://localhost:9093 | AlertManager |
+| http://localhost:3000 | Grafana (credentials from `.env`) |
 
 ## Dashboard
 
@@ -75,6 +59,8 @@ The dashboard polls all five services every few seconds and renders their UP/DOW
 - Live heap usage (MB) fetched via the sentinel-agent proxy
 - Active, suppressed, and resolved alerts from AlertManager
 - Per-service color coding: green (lab-rat), blue (sentinel), orange (Prometheus), yellow (AlertManager), purple (Grafana)
+
+Live updates stream over Server-Sent Events from `sentinel-agent` — investigation cards appear in real time when an alert fires, transition `RUNNING → COMPLETE`, and render the markdown diagnostic report.
 
 ## How It Works
 
@@ -86,7 +72,7 @@ The dashboard polls all five services every few seconds and renders their UP/DOW
 
 ## Triggering Chaos
 
-With both Java services running, hit lab-rat's chaos endpoints to fire real alerts:
+With the stack running, hit lab-rat's chaos endpoints to fire real alerts and watch the dashboard react:
 
 ```bash
 curl http://localhost:8080/chaos/leak      # simulate memory leak
@@ -105,9 +91,8 @@ project-sentinel/
 ├── prometheus.yml            # Prometheus scrape and rule configuration
 ├── alert-rules.yml           # Alert threshold definitions
 ├── alertmanager.yml          # Alert routing to sentinel-agent webhook
-├── docker-compose.yml        # Prometheus, AlertManager, Grafana
-├── run.ps1                   # Starts lab-rat and sentinel-agent on Windows
-└── .env.example              # Environment variable template
+├── docker-compose.yml        # Full stack: Postgres, Prometheus, AlertManager, Grafana, lab-rat, sentinel-agent, dashboard
+└── .env.example              # Environment variable template (copy to .env)
 ```
 
 ## License

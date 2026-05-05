@@ -17,14 +17,23 @@ repositories {
 	mavenCentral()
 }
 
+// Mockito 5.x: load mockito-core as a Java agent rather than letting it self-attach
+// at runtime. Future JDKs will disallow dynamic agent loading, and this configuration
+// silences the "self-attaching" warning while staying forward-compatible.
+configurations {
+	mockitoAgent
+}
+
 dependencies {
 	implementation 'org.springframework.boot:spring-boot-starter-web'
 	implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
 	implementation 'com.fasterxml.jackson.core:jackson-databind'
 
-	implementation 'dev.langchain4j:langchain4j:0.35.0'
-	implementation 'dev.langchain4j:langchain4j-google-ai-gemini:0.35.0'
-	implementation 'dev.langchain4j:langchain4j-spring-boot-starter:0.35.0'
+	// LangChain4j 1.13.x — Spring Boot starter dropped because it's not compatible
+	// with Spring Boot 4.0 (langchain4j/langchain4j#4268). We wire beans manually
+	// in AgentConfiguration.java anyway, so the starter was never required here.
+	implementation 'dev.langchain4j:langchain4j:1.13.1'
+	implementation 'dev.langchain4j:langchain4j-google-ai-gemini:1.13.1'
 
 	implementation project(':sentinel-core')
 
@@ -33,11 +42,19 @@ dependencies {
 	runtimeOnly 'org.postgresql:postgresql'
 
 	testImplementation 'org.springframework.boot:spring-boot-starter-test'
+	// Spring Boot 4.0 split @WebMvcTest into its own module
+	testImplementation 'org.springframework.boot:spring-boot-webmvc-test'
 	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+
+	// Version managed by Spring Boot's dependency BOM.
+	mockitoAgent('org.mockito:mockito-core') {
+		transitive = false
+	}
 }
 
 tasks.named('test') {
 	useJUnitPlatform()
+	jvmArgs("-javaagent:${configurations.mockitoAgent.asPath}")
 }
 
 // Load .env from project root and pass as environment variables to bootRun.

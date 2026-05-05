@@ -72,10 +72,8 @@ services:
 
   # ---------------------------------------------------------------------------
   # Postgres
-  # Optional persistent database for sentinel-agent investigations.
-  # Activate with: SPRING_PROFILES_ACTIVE=postgres (set in .env)
-  # H2 in-memory is the default — Postgres is only needed for data durability
-  # across agent restarts or for multi-instance deployments.
+  # Persistent database for sentinel-agent investigations.
+  # Always active in Docker — datasource config lives in application-docker.properties.
   # ---------------------------------------------------------------------------
   postgres:
     image: postgres:16-alpine
@@ -117,7 +115,7 @@ services:
     env_file:
       - .env
     environment:
-      - SPRING_PROFILES_ACTIVE=docker,postgres
+      - SPRING_PROFILES_ACTIVE=docker
     depends_on:
       - postgres
       - lab-rat

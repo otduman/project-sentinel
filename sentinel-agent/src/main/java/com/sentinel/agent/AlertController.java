@@ -78,7 +78,6 @@ public class AlertController {
     // AlertManager webhook v4 payload structure:
     // { "status": "firing", "commonLabels": { "alertname": "...", "severity": "..." },
     //   "commonAnnotations": { "summary": "..." }, "alerts": [...] }
-    @SuppressWarnings("unchecked")
     private String extractSafeString(Map<String, Object> payload, String mapKey, String key, String fallback) {
         Object subMap = payload.get(mapKey);
         if (subMap instanceof Map<?,?> m) {
