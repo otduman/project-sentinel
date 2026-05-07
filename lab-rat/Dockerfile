@@ -1,9 +1,12 @@
 # ── Build stage ──────────────────────────────────────────────────────────────
-FROM gradle:8.14-jdk21-alpine AS builder
+# Pinned to the same Gradle version as gradle/wrapper/gradle-wrapper.properties.
+# When you bump the wrapper, also bump this tag (and the sentinel-agent
+# Dockerfile) and update VERSIONS.md.
+FROM gradle:9.4.1-jdk21-alpine AS builder
 WORKDIR /build
 
-# Copy project descriptor and only the modules lab-rat needs
 COPY settings.gradle .
+COPY gradle.properties .
 COPY lab-rat/ lab-rat/
 
 RUN gradle :lab-rat:bootJar --no-daemon -x test

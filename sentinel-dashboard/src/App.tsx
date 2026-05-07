@@ -44,6 +44,21 @@ interface Investigation {
   proposedFix: string | null;
 }
 
+// Mirrors com.sentinel.agent.ProposedPatch — a structured patch the agent
+// proposed for an investigation, awaiting human approval before any file
+// is touched (Phase 2 will introduce the actual filesystem write).
+interface ProposedPatch {
+  id: string;
+  investigationId: string;
+  filePath: string;
+  oldContent: string | null;
+  newContent: string;
+  status: 'PENDING_REVIEW' | 'APPROVED' | 'REJECTED' | 'APPLIED' | 'ROLLED_BACK';
+  createdAt: string;
+  decidedAt: string | null;
+  rationale: string | null;
+}
+
 // ---------------------------------------------------------------------------
 // Service configuration
 // ---------------------------------------------------------------------------
@@ -130,6 +145,27 @@ async function fetchInvestigations(): Promise<Investigation[]> {
     if (!res.ok) return [];
     return res.json();
   } catch { return []; }
+}
+
+async function fetchPatchForInvestigation(investigationId: string): Promise<ProposedPatch | null> {
+  try {
+    const res = await fetch(`http://localhost:8081/api/patches/by-investigation/${investigationId}`,
+        { signal: AbortSignal.timeout(5000) });
+    if (res.status === 404) return null;
+    if (!res.ok) return null;
+    return res.json();
+  } catch { return null; }
+}
+
+async function decidePatch(patchId: string, decision: 'approve' | 'reject'): Promise<ProposedPatch | null> {
+  try {
+    const res = await fetch(`http://localhost:8081/api/patches/${patchId}/${decision}`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return null;
+    return res.json();
+  } catch { return null; }
 }
 
 // ---------------------------------------------------------------------------
@@ -1550,6 +1586,151 @@ function ReportMarkdown({ source, accent }: { source: string; accent: string }) 
   );
 }
 
+// PatchPanel — Phase 1 approval gate. Renders a stacked "before vs after" view
+// of the agent's proposed patch with Approve / Reject buttons. Phase 1 records
+// the decision only; Phase 2 will hook APPROVED rows into a PatchApplier that
+// writes to disk and triggers a Spring DevTools restart.
+function PatchPanel({ patch, onDecision }: {
+  patch: ProposedPatch;
+  onDecision: (next: ProposedPatch) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const isPending = patch.status === 'PENDING_REVIEW';
+
+  const decide = async (decision: 'approve' | 'reject') => {
+    if (busy) return;
+    setBusy(true);
+    const updated = await decidePatch(patch.id, decision);
+    setBusy(false);
+    if (updated) onDecision(updated);
+  };
+
+  // Status colour mapping reuses the section accents: yellow = pending, green
+  // = approved, red = rejected. APPLIED / ROLLED_BACK only matter in Phase 2+.
+  const statusColor =
+      patch.status === 'PENDING_REVIEW' ? '#eab308'
+    : patch.status === 'APPROVED'        ? '#22c55e'
+    : patch.status === 'APPLIED'         ? '#22c55e'
+    : patch.status === 'REJECTED'        ? '#ef4444'
+    : patch.status === 'ROLLED_BACK'     ? '#ef4444'
+    : '#6b7280';
+
+  const codeBlockStyle = (border: string): React.CSSProperties => ({
+    fontFamily: "'JetBrains Mono', Consolas, monospace",
+    fontSize: '10px',
+    color: '#c9d1d9',
+    background: 'rgba(0,0,0,0.35)',
+    border: `1px solid ${border}`,
+    borderRadius: '3px',
+    padding: '8px 10px',
+    margin: '4px 0 8px 0',
+    overflowX: 'auto',
+    whiteSpace: 'pre',
+    maxHeight: '260px',
+    overflowY: 'auto',
+  });
+
+  return (
+    <div style={{
+      borderLeft: `3px solid ${statusColor}`,
+      background: 'rgba(255,255,255,0.03)',
+      borderRadius: '0 3px 3px 0',
+      padding: '8px 10px',
+      marginBottom: '8px',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '5px' }}>
+        <span style={{ fontSize: '9px', letterSpacing: '0.15em', color: statusColor, fontWeight: 600 }}>
+          PROPOSED PATCH
+        </span>
+        <span style={{
+          fontSize: '8px',
+          padding: '1px 5px',
+          borderRadius: '3px',
+          background: `${statusColor}22`,
+          color: statusColor,
+          border: `1px solid ${statusColor}44`,
+          letterSpacing: '0.08em',
+        }}>
+          {patch.status}
+        </span>
+      </div>
+
+      <div style={{ fontSize: '10px', color: '#9aa5b1', marginBottom: '4px', wordBreak: 'break-all' }}>
+        <span style={{ color: '#6b7280' }}>FILE  </span>
+        {patch.filePath}
+      </div>
+
+      {patch.rationale && (
+        <div style={{ fontSize: '11px', color: '#c9d1d9', lineHeight: 1.5, margin: '4px 0 8px 0' }}>
+          <span style={{ color: '#6b7280', fontSize: '9px', letterSpacing: '0.1em' }}>RATIONALE  </span>
+          {patch.rationale}
+        </div>
+      )}
+
+      {patch.oldContent && (
+        <>
+          <div style={{ fontSize: '9px', letterSpacing: '0.1em', color: '#ef4444', marginBottom: '2px' }}>− BEFORE</div>
+          <pre style={codeBlockStyle('rgba(239,68,68,0.25)')}>{patch.oldContent}</pre>
+        </>
+      )}
+
+      <div style={{ fontSize: '9px', letterSpacing: '0.1em', color: '#22c55e', marginBottom: '2px' }}>+ AFTER</div>
+      <pre style={codeBlockStyle('rgba(34,197,94,0.25)')}>{patch.newContent}</pre>
+
+      {isPending && (
+        <div style={{ display: 'flex', gap: '6px', marginTop: '6px' }}>
+          <button
+            onClick={() => decide('approve')}
+            disabled={busy}
+            style={{
+              flex: 1,
+              padding: '6px 8px',
+              fontFamily: "'JetBrains Mono', Consolas, monospace",
+              fontSize: '10px',
+              letterSpacing: '0.1em',
+              fontWeight: 600,
+              color: '#22c55e',
+              background: 'rgba(34,197,94,0.1)',
+              border: '1px solid rgba(34,197,94,0.4)',
+              borderRadius: '3px',
+              cursor: busy ? 'wait' : 'pointer',
+              opacity: busy ? 0.5 : 1,
+            }}
+          >
+            APPROVE
+          </button>
+          <button
+            onClick={() => decide('reject')}
+            disabled={busy}
+            style={{
+              flex: 1,
+              padding: '6px 8px',
+              fontFamily: "'JetBrains Mono', Consolas, monospace",
+              fontSize: '10px',
+              letterSpacing: '0.1em',
+              fontWeight: 600,
+              color: '#ef4444',
+              background: 'rgba(239,68,68,0.1)',
+              border: '1px solid rgba(239,68,68,0.4)',
+              borderRadius: '3px',
+              cursor: busy ? 'wait' : 'pointer',
+              opacity: busy ? 0.5 : 1,
+            }}
+          >
+            REJECT
+          </button>
+        </div>
+      )}
+
+      {!isPending && patch.decidedAt && (
+        <div style={{ fontSize: '9px', color: '#6b7280', marginTop: '4px', letterSpacing: '0.06em' }}>
+          DECIDED {relativeTime(patch.decidedAt)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 interface CommandSidebarProps {
   alerts: AlertEntry[];
   investigations: Investigation[];
@@ -1559,6 +1740,7 @@ interface CommandSidebarProps {
 
 function CommandSidebar({ alerts, investigations, activeCount, sseConnected }: CommandSidebarProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [patch, setPatch] = useState<ProposedPatch | null>(null);
   const mono = "'JetBrains Mono', 'Courier New', monospace";
 
   // AlertManager state — surfaced as a compact pill at the top instead of a full
@@ -1570,9 +1752,24 @@ function CommandSidebar({ alerts, investigations, activeCount, sseConnected }: C
 
   const selected = selectedId ? investigations.find(i => i.id === selectedId) ?? null : null;
 
+  // Pull the proposed patch (if any) when an investigation is opened. Phase 1
+  // returns null for older investigations that pre-date the patch entity —
+  // the panel simply doesn't render in that case.
+  useEffect(() => {
+    if (!selectedId) { setPatch(null); return; }
+    let cancelled = false;
+    fetchPatchForInvestigation(selectedId).then(p => {
+      if (!cancelled) setPatch(p);
+    });
+    return () => { cancelled = true; };
+  }, [selectedId]);
+
   return (
     <div style={{
-      width: '420px',
+      // 520px gives ~70 monospace chars per line at 10.5px which fits the kind
+      // of Java one-liners Gemini emits in PROPOSED FIX code blocks without
+      // forcing horizontal scroll. Pre blocks still scroll on truly long lines.
+      width: '520px',
       flexShrink: 0,
       display: 'flex',
       flexDirection: 'column',
@@ -1698,6 +1895,12 @@ function CommandSidebar({ alerts, investigations, activeCount, sseConnected }: C
                     <ReportMarkdown source={content} accent={accent} />
                   </div>
                 ) : null
+              )}
+              {patch && (
+                <PatchPanel
+                  patch={patch}
+                  onDecision={updated => setPatch(updated)}
+                />
               )}
             </div>
           ) : (

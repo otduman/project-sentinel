@@ -30,19 +30,35 @@ import java.util.regex.Pattern;
 public class InvestigationService {
 
     // Matches section headers produced by Gemini in its free-text reports.
-    // Handles bold (**), heading (#), and plain variants, with or without trailing colon.
+    // Handles all observed shapes:
+    //   **Symptoms**:       — bold close, then colon
+    //   **Symptoms:**       — colon inside bold (Gemini frequently does this)
+    //   ## Symptoms         — markdown heading (any level h1-h6)
+    //   #### Symptoms       — Gemini sometimes nests under a top-level title
+    //   Symptoms:           — plain
+    // The hash range is widened to 1-6 (full markdown heading range) — Gemini
+    // emits #### subsection headers when the overall document already uses
+    // ### for its title. Trailing `(?:\\*{1,2})?` after the optional colon
+    // handles the **Section:** form so the bold close isn't leaked into body.
     private static final Pattern SECTION = Pattern.compile(
-            "^[ \t]*(?:\\*{1,2}|#{1,3}\\s*)?(Symptoms|Evidence|Root\\s*Cause|Proposed\\s*Fix)(?:\\*{1,2})?\\s*:?\\s*",
+            "^[ \t]*(?:\\*{1,2}|#{1,6}\\s*)?(Symptoms|Evidence|Root\\s*Cause|Proposed\\s*Fix)(?:\\*{1,2})?\\s*:?\\s*(?:\\*{1,2})?\\s*",
             Pattern.CASE_INSENSITIVE | Pattern.MULTILINE
     );
 
     /**
-     * How long after a firing webhook to treat subsequent webhooks for the same
-     * alertName as duplicates. AlertManager's default {@code repeat_interval}
-     * is 5 minutes; 10 covers that with a margin so a still-firing alert never
-     * spawns a second investigation row.
+     * Backstop for episode-based dedupe: if an "active" investigation (one with
+     * {@code alertResolvedAt} still null) is older than this, treat it as
+     * orphaned and create a fresh investigation anyway. Self-heals the edge
+     * case where AlertManager's {@code resolved} webhook is lost — without a
+     * backstop, an active episode would dedupe forever.
+     *
+     * <p>The primary dedupe mechanism is now the explicit {@code resolveEpisode}
+     * call wired to {@code status=resolved} webhooks, so this only matters in
+     * the rare case that webhook never arrives. 3 hours is generous for any
+     * realistic demo/chaos session (one investigation per session) without
+     * being so long that a truly missed-resolve scenario locks dedupe forever.
      */
-    private static final java.time.Duration DEDUP_WINDOW = java.time.Duration.ofMinutes(10);
+    private static final java.time.Duration EPISODE_BACKSTOP = java.time.Duration.ofHours(3);
 
     private final InvestigationRepository repository;
     private final BudgetedChatModel budgetedChatModel;
@@ -81,30 +97,67 @@ public class InvestigationService {
     /**
      * Resolves the appropriate investigation for an incoming firing-alert webhook:
      * either creates a new PENDING investigation (notifying subscribers), or
-     * returns the most recent investigation for the same alertName started within
-     * {@link #DEDUP_WINDOW}. The latter case prevents duplicate rows when
-     * AlertManager re-sends a still-firing alert at its {@code repeat_interval}.
+     * returns the existing investigation for an active episode of the same
+     * alertName.
      *
-     * @return a {@link StartResult} where {@code wasReused == true} signals to the
-     *         caller (typically {@code AlertController}) that no AI dispatch should
-     *         be triggered — the existing investigation is already handling this
-     *         alert episode.
+     * <p>An "active episode" = an investigation whose {@code alertResolvedAt}
+     * is still null AND that started within {@link #EPISODE_BACKSTOP}. As long
+     * as those conditions hold, every subsequent firing webhook for the same
+     * alertName is collapsed onto that one row — no new investigation, no new
+     * Gemini invocation, no token spend.
+     *
+     * <p>The episode ends when {@link #resolveEpisode(String)} fires (driven by
+     * an AlertManager {@code resolved} webhook), at which point the next firing
+     * webhook will create a fresh investigation.
+     *
+     * @return a {@link StartResult} where {@code wasReused == true} signals to
+     *         the caller (typically {@code AlertController}) that no AI dispatch
+     *         should be triggered — the existing investigation is already
+     *         handling this alert episode.
      */
     public StartResult start(String alertName, String severity) {
-        Instant cutoff = Instant.now().minus(DEDUP_WINDOW);
+        Instant cutoff = Instant.now().minus(EPISODE_BACKSTOP);
         Optional<Investigation> recent =
-                repository.findFirstByAlertNameAndStartedAtAfterOrderByStartedAtDesc(alertName, cutoff);
+                repository.findFirstByAlertNameAndAlertResolvedAtIsNullAndStartedAtAfterOrderByStartedAtDesc(
+                        alertName, cutoff);
         if (recent.isPresent()) {
             Investigation existing = recent.get();
             System.out.println("[Sentinel] Deduped webhook for alert='" + alertName
                     + "' — reusing investigation " + existing.getId()
-                    + " (status=" + existing.getStatus() + ")");
+                    + " (status=" + existing.getStatus() + ", episode still active)");
             return new StartResult(existing, true);
         }
         Investigation inv = Investigation.create(alertName, severity);
         inv = repository.save(inv);
         broadcast("investigation_started", inv);
         return new StartResult(inv, false);
+    }
+
+    /**
+     * Closes the currently-active episode(s) for an alertName by stamping
+     * {@code alertResolvedAt = now} on every matching investigation. Driven by
+     * the {@code status=resolved} AlertManager webhook in
+     * {@code AlertController.receiveAlert}.
+     *
+     * <p>After this returns, the next firing webhook for the same alertName
+     * will create a brand-new investigation — i.e. a genuinely separate
+     * incident, not a continuation of the resolved one.
+     *
+     * <p>Idempotent: running it twice (or against an alertName with no active
+     * episode) is a no-op.
+     */
+    @Transactional
+    public void resolveEpisode(String alertName) {
+        Instant now = Instant.now();
+        List<Investigation> active = repository.findByAlertNameAndAlertResolvedAtIsNull(alertName);
+        if (active.isEmpty()) return;
+        for (Investigation inv : active) {
+            inv.setAlertResolvedAt(now);
+            Investigation saved = repository.save(inv);
+            broadcast("episode_resolved", saved);
+        }
+        System.out.println("[Sentinel] Resolved " + active.size()
+                + " active episode(s) for alert='" + alertName + "'");
     }
 
     /**

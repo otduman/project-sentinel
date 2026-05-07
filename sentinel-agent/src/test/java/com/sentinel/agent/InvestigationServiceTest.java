@@ -43,7 +43,7 @@ class InvestigationServiceTest {
 
     @Test
     void start_persistsPendingInvestigation() {
-        when(repository.findFirstByAlertNameAndStartedAtAfterOrderByStartedAtDesc(
+        when(repository.findFirstByAlertNameAndAlertResolvedAtIsNullAndStartedAtAfterOrderByStartedAtDesc(
                 eq("HighCpuAlert"), any(java.time.Instant.class))).thenReturn(Optional.empty());
         when(repository.save(any(Investigation.class))).thenAnswer(inv -> {
             Investigation arg = inv.getArgument(0);
@@ -61,17 +61,19 @@ class InvestigationServiceTest {
         assertThat(saved.getAlertName()).isEqualTo("HighCpuAlert");
         assertThat(saved.getSeverity()).isEqualTo("critical");
         assertThat(saved.getStartedAt()).isNotNull();
+        assertThat(saved.getAlertResolvedAt()).isNull();
         assertThat(result.investigation().getId()).isEqualTo(id);
         assertThat(result.wasReused()).isFalse();
     }
 
     @Test
-    void start_reusesRecentInvestigationForSameAlert() {
-        // A still-firing alert re-sent by AlertManager at its repeat_interval must
-        // not spawn a second investigation row — the existing one should be reused.
+    void start_reusesActiveEpisodeForSameAlert() {
+        // A still-firing alert re-sent by AlertManager must dedupe to the
+        // existing active-episode investigation — no new row, no Gemini call.
         Investigation existing = Investigation.create("HighCpuAlert", "critical");
         existing.setId(id);
-        when(repository.findFirstByAlertNameAndStartedAtAfterOrderByStartedAtDesc(
+        // alertResolvedAt is null by default → episode is still active
+        when(repository.findFirstByAlertNameAndAlertResolvedAtIsNullAndStartedAtAfterOrderByStartedAtDesc(
                 eq("HighCpuAlert"), any(java.time.Instant.class)))
                 .thenReturn(Optional.of(existing));
 
@@ -79,6 +81,57 @@ class InvestigationServiceTest {
 
         assertThat(result.wasReused()).isTrue();
         assertThat(result.investigation()).isSameAs(existing);
+        verify(repository, never()).save(any(Investigation.class));
+    }
+
+    @Test
+    void start_createsFreshInvestigationAfterEpisodeResolved() {
+        // After resolveEpisode runs, the previous investigation has alertResolvedAt
+        // set, so the active-episode finder returns empty. Next firing webhook
+        // must create a fresh investigation.
+        when(repository.findFirstByAlertNameAndAlertResolvedAtIsNullAndStartedAtAfterOrderByStartedAtDesc(
+                eq("HighCpuAlert"), any(java.time.Instant.class)))
+                .thenReturn(Optional.empty());
+        when(repository.save(any(Investigation.class))).thenAnswer(inv -> {
+            Investigation arg = inv.getArgument(0);
+            arg.setId(id);
+            return arg;
+        });
+
+        InvestigationService.StartResult result = service.start("HighCpuAlert", "critical");
+
+        assertThat(result.wasReused()).isFalse();
+        verify(repository).save(any(Investigation.class));
+    }
+
+    // -------------------------------------------------------------------------
+    // resolveEpisode()
+    // -------------------------------------------------------------------------
+
+    @Test
+    void resolveEpisode_marksAllActiveInvestigationsResolved() {
+        Investigation a = Investigation.create("HighCpuAlert", "critical");
+        a.setId(UUID.randomUUID());
+        Investigation b = Investigation.create("HighCpuAlert", "critical");
+        b.setId(UUID.randomUUID());
+        when(repository.findByAlertNameAndAlertResolvedAtIsNull("HighCpuAlert"))
+                .thenReturn(java.util.List.of(a, b));
+        when(repository.save(any(Investigation.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        service.resolveEpisode("HighCpuAlert");
+
+        assertThat(a.getAlertResolvedAt()).isNotNull();
+        assertThat(b.getAlertResolvedAt()).isNotNull();
+        verify(repository, times(2)).save(any(Investigation.class));
+    }
+
+    @Test
+    void resolveEpisode_noActiveInvestigations_isNoOp() {
+        when(repository.findByAlertNameAndAlertResolvedAtIsNull("HighCpuAlert"))
+                .thenReturn(java.util.List.of());
+
+        service.resolveEpisode("HighCpuAlert");
+
         verify(repository, never()).save(any(Investigation.class));
     }
 
@@ -126,6 +179,61 @@ class InvestigationServiceTest {
         // Sections that weren't supplied stay null.
         assertThat(investigation.getEvidence()).isNull();
         assertThat(investigation.getProposedFix()).isNull();
+    }
+
+    @Test
+    void complete_parsesGeminiNestedHashHeadings() {
+        // Regression: when the report uses ### for the document title, Gemini
+        // emits #### for subsections. The parser must accept the full markdown
+        // heading range (h1-h6), not just h1-h3, otherwise the entire report
+        // falls back into the symptoms field.
+        String report = """
+                ### Investigation Report: HighHeapUsage
+
+                #### Symptoms
+                Heap exceeded 200 MB.
+
+                #### Evidence
+                Logs show 21 allocations.
+
+                #### Root Cause
+                Static memoryLeakList accumulates 10MB blocks.
+
+                #### Proposed Fix
+                Clear the list and remove the endpoint.
+                """;
+        when(repository.findById(id)).thenReturn(Optional.of(investigation));
+        when(repository.save(any(Investigation.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        service.complete(id, report);
+
+        assertThat(investigation.getSymptoms()).contains("Heap exceeded 200 MB");
+        assertThat(investigation.getEvidence()).contains("21 allocations");
+        assertThat(investigation.getRootCause()).contains("memoryLeakList");
+        assertThat(investigation.getProposedFix()).contains("Clear the list");
+    }
+
+    @Test
+    void complete_parsesColonInsideBoldHeader() {
+        // Regression: Gemini sometimes emits "**Section:**" (colon inside the
+        // bold markers) instead of "**Section**:". The trailing ** must be
+        // consumed as part of the header, not leaked into the section body.
+        String report = """
+                **Symptoms:**
+                Heap exceeded 200 MB.
+
+                **Root Cause:**
+                Static memoryLeakList accumulates blocks.
+                """;
+        when(repository.findById(id)).thenReturn(Optional.of(investigation));
+        when(repository.save(any(Investigation.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        service.complete(id, report);
+
+        assertThat(investigation.getSymptoms()).contains("Heap exceeded 200 MB");
+        assertThat(investigation.getSymptoms()).doesNotStartWith("**");
+        assertThat(investigation.getRootCause()).contains("memoryLeakList");
+        assertThat(investigation.getRootCause()).doesNotStartWith("**");
     }
 
     @Test

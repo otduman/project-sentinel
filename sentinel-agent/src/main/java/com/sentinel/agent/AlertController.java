@@ -41,6 +41,18 @@ public class AlertController {
         System.out.println("Received Prometheus AlertManager Webhook");
 
         String status = (String) payload.get("status");
+        String alertNameForResolve = extractSafeString(payload, "commonLabels", "alertname", "Unknown Alert");
+
+        // Resolved webhooks aren't a no-op anymore — they close the active
+        // episode so the next firing webhook for this alert spawns a fresh
+        // investigation instead of being deduped onto a stale row.
+        if ("resolved".equals(status)) {
+            System.out.println("[Sentinel] Alert RESOLVED for '" + alertNameForResolve
+                    + "'. Closing active episode.");
+            investigationService.resolveEpisode(alertNameForResolve);
+            return ResponseEntity.ok().build();
+        }
+
         if (!"firing".equals(status)) {
             System.out.println("[Sentinel] Alert status: " + status + ". Ignoring.");
             return ResponseEntity.ok().build();
@@ -51,7 +63,7 @@ public class AlertController {
         // Extract only structured, known fields — never pass raw payload strings to the LLM
         // to prevent prompt injection via attacker-controlled alert annotations.
         // AlertManager webhook v4 nests labels under "commonLabels" and annotations under "commonAnnotations".
-        String alertName = extractSafeString(payload, "commonLabels", "alertname", "Unknown Alert");
+        String alertName = alertNameForResolve;
         String severity  = extractSafeString(payload, "commonLabels", "severity",  "unknown");
         String summary   = extractSafeString(payload, "commonAnnotations", "summary", "");
         String incidentDescription = "Alert: " + alertName
@@ -70,6 +82,11 @@ public class AlertController {
 
         Investigation investigation = startResult.investigation();
         investigationExecutor.execute(() -> {
+            // MemoryIdContext binds the active investigation id to this worker
+            // thread so downstream tools (proposeFix) and the BudgetedChatModel
+            // can attribute their work back to the right investigation row.
+            // Cleared in finally to avoid leaking a stale id onto a pooled thread.
+            MemoryIdContext.set(investigation.getId().toString());
             try {
                 String result = sreAgent.investigate(investigation.getId().toString(), incidentDescription);
                 System.out.println("[Sentinel] Investigation [" + investigation.getId() + "] complete:\n" + result);
@@ -77,6 +94,8 @@ public class AlertController {
             } catch (Exception e) {
                 System.err.println("[Sentinel] Investigation [" + investigation.getId() + "] failed: " + e.getMessage());
                 investigationService.fail(investigation.getId(), e.getMessage());
+            } finally {
+                MemoryIdContext.clear();
             }
         });
 

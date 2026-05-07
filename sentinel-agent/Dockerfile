@@ -1,8 +1,12 @@
 # ── Build stage ──────────────────────────────────────────────────────────────
-FROM gradle:8.14-jdk21-alpine AS builder
+# Pinned to the same Gradle version as gradle/wrapper/gradle-wrapper.properties.
+# When you bump the wrapper, also bump this tag (and the lab-rat Dockerfile)
+# and update VERSIONS.md. See VERSIONS.md for the full version policy.
+FROM gradle:9.4.1-jdk21-alpine AS builder
 WORKDIR /build
 
 COPY settings.gradle .
+COPY gradle.properties .
 COPY sentinel-core/ sentinel-core/
 COPY sentinel-agent/ sentinel-agent/
 

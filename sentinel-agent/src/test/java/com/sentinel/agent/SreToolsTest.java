@@ -24,11 +24,14 @@ class SreToolsTest {
     @Mock
     private InvestigationRepository investigationRepository;
 
+    @Mock
+    private ProposedPatchRepository proposedPatchRepository;
+
     private SreTools tools;
 
     @BeforeEach
     void setUp() {
-        tools = new SreTools(runbookRepository, investigationRepository);
+        tools = new SreTools(runbookRepository, investigationRepository, proposedPatchRepository);
         // @Value-injected fields — set via reflection since we're not bringing up a Spring context.
         ReflectionTestUtils.setField(tools, "logPath", "/tmp/does-not-exist.log");
         ReflectionTestUtils.setField(tools, "agentJarPath", "/tmp/does-not-exist.jar");

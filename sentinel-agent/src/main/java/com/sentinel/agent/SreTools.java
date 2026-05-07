@@ -2,6 +2,7 @@ package com.sentinel.agent;
 
 import com.sentinel.core.logging.LogFetcher;
 import com.sentinel.core.profiler.ProfilerAttacher;
+import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -9,6 +10,7 @@ import org.springframework.stereotype.Component;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.file.Path;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -26,10 +28,14 @@ public class SreTools {
 
     private final RunbookRepository runbookRepository;
     private final InvestigationRepository investigationRepository;
+    private final ProposedPatchRepository proposedPatchRepository;
 
-    public SreTools(RunbookRepository runbookRepository, InvestigationRepository investigationRepository) {
+    public SreTools(RunbookRepository runbookRepository,
+                    InvestigationRepository investigationRepository,
+                    ProposedPatchRepository proposedPatchRepository) {
         this.runbookRepository = runbookRepository;
         this.investigationRepository = investigationRepository;
+        this.proposedPatchRepository = proposedPatchRepository;
     }
 
     @Tool("Fetches the latest ERROR and WARN logs from the target microservice. Use this to find stack traces.")
@@ -101,12 +107,70 @@ public class SreTools {
         }
     }
 
-    @Tool("Proposes a source code fix based on the diagnostic findings. Formats the output as a unified diff or code block. Provide the specific file name and the patched code. Use this ONLY after identifying the root cause.")
-    public String proposeFix(String fileToFix, String proposedCodeOverride) {
-        System.out.println("[Sentinel FixProposer] Fix generated for " + fileToFix + "!");
-        // Stores the proposal only — any future automation that applies this to the filesystem
-        // must treat the content as untrusted and require explicit human approval before execution.
-        return "SUCCESS. Fix registered in system memory for: " + fileToFix + "\n\n" + proposedCodeOverride;
+    @Tool("Proposes a structured source-code fix to a single .java file inside the lab-rat package " +
+            "(com.sentinel.lab_rat). Persists the patch in PENDING_REVIEW status — a human must approve " +
+            "or reject it via the dashboard before any file is touched. Provide the EXACT current " +
+            "contents of the file as oldCode (so a diff can be shown) and the full replacement " +
+            "contents as newCode. A short rationale is required for the audit log. Call this only " +
+            "after identifying the root cause and only for files within com.sentinel.lab_rat.")
+    public String proposeFix(
+            @P("Java file inside lab-rat — e.g. 'ChaosController.java' or " +
+                    "'com/sentinel/lab_rat/ChaosController.java'. Must be a .java file under com.sentinel.lab_rat.")
+            String filePath,
+            @P("EXACT current contents of the target file. Used to build a diff for the human reviewer " +
+                    "and (in Phase 2) to detect drift before applying. If unsure, fetch the file first.")
+            String oldCode,
+            @P("Full proposed contents of the file after the fix. NOT a diff — the complete replacement " +
+                    "file. Must compile against Spring Boot 4.0 and Java 21.")
+            String newCode,
+            @P("One- or two-sentence justification for the change. Stored on the patch row for audit.")
+            String rationale) {
+
+        // 1. Look up the active investigation via the per-call ThreadLocal that
+        //    InvestigationService populates at investigation start. Without this
+        //    we can't link the patch back to its investigation row.
+        String memoryId = MemoryIdContext.get();
+        UUID investigationId;
+        try {
+            investigationId = UUID.fromString(memoryId);
+        } catch (Exception e) {
+            return "ERROR: proposeFix called outside an active investigation context. "
+                    + "This tool is only valid mid-investigation.";
+        }
+
+        // 2. Validate the path against the allowlist BEFORE persisting anything.
+        //    This is the single safety gate that keeps the agent from touching
+        //    files outside lab-rat — including its own source.
+        String canonicalPath;
+        try {
+            canonicalPath = PatchPathValidator.normalise(filePath);
+        } catch (IllegalArgumentException e) {
+            return "REJECTED: " + e.getMessage()
+                    + ". Re-call proposeFix with a valid path inside com.sentinel.lab_rat.";
+        }
+
+        // 3. Size sanity — refuse absurd payloads. 64KB per side is generous for
+        //    a single class file; if the agent wants to rewrite something larger
+        //    that's a sign the proposal is overreaching.
+        int maxBytes = 64 * 1024;
+        if (newCode == null || newCode.isBlank()) {
+            return "REJECTED: newCode is empty. proposeFix requires the full replacement file content.";
+        }
+        if (newCode.length() > maxBytes || (oldCode != null && oldCode.length() > maxBytes)) {
+            return "REJECTED: file content exceeds the 64KB cap for proposed patches.";
+        }
+
+        // 4. Persist as PENDING_REVIEW. Dashboard surfaces this; human approves/rejects.
+        ProposedPatch patch = ProposedPatch.create(
+                investigationId, canonicalPath, oldCode, newCode, rationale);
+        ProposedPatch saved = proposedPatchRepository.save(patch);
+
+        System.out.println("[Sentinel FixProposer] Patch " + saved.getId()
+                + " queued for review (file=" + canonicalPath
+                + ", investigation=" + investigationId + ")");
+
+        return "SUCCESS. Patch " + saved.getId() + " queued for human approval. "
+                + "File: " + canonicalPath + ". Status: PENDING_REVIEW.";
     }
 
     @Tool("Retrieves the operational runbook for the given alert name. Returns step-by-step diagnosis and resolution procedures written by the SRE team. ALWAYS call this first at the start of any investigation.")

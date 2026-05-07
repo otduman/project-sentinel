@@ -34,6 +34,19 @@ public class Investigation {
     @Column
     private Instant completedAt;
 
+    /**
+     * Set when AlertManager sends a {@code status=resolved} webhook for this
+     * alertName. As long as this is null, the alert episode is considered
+     * "still firing" — and any incoming firing webhook for the same alertName
+     * is deduped to this investigation instead of spawning a new one (which
+     * would re-invoke Gemini and re-spend tokens on the same incident).
+     *
+     * <p>Once set: the next firing webhook for this alertName starts a
+     * fresh investigation — i.e. a genuinely new episode of the same alert.
+     */
+    @Column
+    private Instant alertResolvedAt;
+
     @Column(columnDefinition = "TEXT")
     private String symptoms;
 
@@ -91,6 +104,10 @@ public class Investigation {
         return completedAt;
     }
 
+    public Instant getAlertResolvedAt() {
+        return alertResolvedAt;
+    }
+
     public String getSymptoms() {
         return symptoms;
     }
@@ -131,6 +148,10 @@ public class Investigation {
 
     public void setCompletedAt(Instant completedAt) {
         this.completedAt = completedAt;
+    }
+
+    public void setAlertResolvedAt(Instant alertResolvedAt) {
+        this.alertResolvedAt = alertResolvedAt;
     }
 
     public void setSymptoms(String symptoms) {

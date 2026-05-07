@@ -14,7 +14,8 @@ services:
   # POST /-/reload without restarting the container.
   # ---------------------------------------------------------------------------
   prometheus:
-    image: prom/prometheus:latest
+    # Pinned for reproducibility — see VERSIONS.md before bumping.
+    image: prom/prometheus:v3.0.1
     container_name: sentinel-prometheus
     ports:
       - "9090:9090"
@@ -38,7 +39,8 @@ services:
   # rules, and routes them to the configured receiver (sentinel-agent webhook).
   # ---------------------------------------------------------------------------
   alertmanager:
-    image: prom/alertmanager:latest
+    # Pinned for reproducibility — see VERSIONS.md before bumping.
+    image: prom/alertmanager:v0.27.0
     container_name: sentinel-alertmanager
     ports:
       # AlertManager UI and Prometheus-to-AlertManager API
@@ -58,7 +60,8 @@ services:
   # Grafana automatically connects to datasources configured in the UI.
   # ---------------------------------------------------------------------------
   grafana:
-    image: grafana/grafana:latest
+    # Pinned for reproducibility — see VERSIONS.md before bumping.
+    image: grafana/grafana:11.4.0
     container_name: sentinel-grafana
     ports:
       - "3000:3000"
