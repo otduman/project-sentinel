@@ -149,14 +149,21 @@ public class SreTools {
                     + ". Re-call proposeFix with a valid path inside com.sentinel.lab_rat.";
         }
 
-        // 3. Size sanity — refuse absurd payloads. 64KB per side is generous for
-        //    a single class file; if the agent wants to rewrite something larger
-        //    that's a sign the proposal is overreaching.
+        // 3. Size & shape sanity. 64KB per side is generous for a single
+        //    class file. oldCode is REQUIRED — without it the applier cannot
+        //    do drift detection and would silently overwrite any out-of-band
+        //    edits made between proposal and approval. Refusing a blind
+        //    overwrite is the safer default.
         int maxBytes = 64 * 1024;
         if (newCode == null || newCode.isBlank()) {
             return "REJECTED: newCode is empty. proposeFix requires the full replacement file content.";
         }
-        if (newCode.length() > maxBytes || (oldCode != null && oldCode.length() > maxBytes)) {
+        if (oldCode == null || oldCode.isBlank()) {
+            return "REJECTED: oldCode is empty. proposeFix requires the EXACT current contents "
+                    + "of the target file so drift can be detected before overwriting. "
+                    + "Read the file first, then re-call with oldCode populated.";
+        }
+        if (newCode.length() > maxBytes || oldCode.length() > maxBytes) {
             return "REJECTED: file content exceeds the 64KB cap for proposed patches.";
         }
 

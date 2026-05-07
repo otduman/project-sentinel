@@ -57,12 +57,22 @@ public class FallbackChatModel implements ChatModel {
     }
 
     /**
-     * Walks the cause chain looking for capacity / rate-limit signals. We match
-     * on message substrings rather than exception types because LangChain4j
+     * Walks the cause chain looking for capacity / rate-limit / availability
+     * signals — anything where retrying on the secondary model has a good
+     * chance of succeeding. Matches on message substrings (and also on the
+     * exception class name, for {@code HttpTimeoutException} where the
+     * message is sometimes just "request timed out") because LangChain4j
      * wraps SDK errors and the exact wrapper class varies between versions.
      */
     private static boolean isRetriable(Throwable t) {
         for (Throwable cur = t; cur != null; cur = cur.getCause()) {
+            // HttpTimeoutException sometimes carries only "request timed out"
+            // as its message — also check the exception type name so a slow
+            // preview model (the original motivation for fallback) reliably
+            // falls back to the GA model instead of failing the investigation.
+            String typeName = cur.getClass().getSimpleName().toLowerCase();
+            if (typeName.contains("timeout")) return true;
+
             String msg = cur.getMessage();
             if (msg == null) continue;
             String lower = msg.toLowerCase();
@@ -74,7 +84,9 @@ public class FallbackChatModel implements ChatModel {
                     || lower.contains("quota")
                     || lower.contains("overloaded")
                     || lower.contains("unavailable")
-                    || lower.contains("503")) {
+                    || lower.contains("503")
+                    || lower.contains("timed out")
+                    || lower.contains("timeout")) {
                 return true;
             }
         }

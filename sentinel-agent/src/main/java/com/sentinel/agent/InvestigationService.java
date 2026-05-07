@@ -118,8 +118,8 @@ public class InvestigationService {
     public StartResult start(String alertName, String severity) {
         Instant cutoff = Instant.now().minus(EPISODE_BACKSTOP);
         Optional<Investigation> recent =
-                repository.findFirstByAlertNameAndAlertResolvedAtIsNullAndStartedAtAfterOrderByStartedAtDesc(
-                        alertName, cutoff);
+                repository.findFirstByAlertNameAndAlertResolvedAtIsNullAndStatusNotAndStartedAtAfterOrderByStartedAtDesc(
+                        alertName, "FAILED", cutoff);
         if (recent.isPresent()) {
             Investigation existing = recent.get();
             System.out.println("[Sentinel] Deduped webhook for alert='" + alertName

@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { diffLines } from 'diff';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -53,7 +54,7 @@ interface ProposedPatch {
   filePath: string;
   oldContent: string | null;
   newContent: string;
-  status: 'PENDING_REVIEW' | 'APPROVED' | 'REJECTED' | 'APPLIED' | 'ROLLED_BACK';
+  status: 'PENDING_REVIEW' | 'APPLYING' | 'APPROVED' | 'REJECTED' | 'APPLIED' | 'ROLLED_BACK';
   createdAt: string;
   decidedAt: string | null;
   rationale: string | null;
@@ -157,15 +158,35 @@ async function fetchPatchForInvestigation(investigationId: string): Promise<Prop
   } catch { return null; }
 }
 
-async function decidePatch(patchId: string, decision: 'approve' | 'reject'): Promise<ProposedPatch | null> {
+// Patch endpoints are bearer-token authenticated (Phase 2 — approve actually
+// writes to disk, so unauthenticated access would be remote code injection).
+// VITE_PATCH_TOKEN is read at build time and must match the agent's
+// agent.patch.secret (AGENT_PATCH_SECRET in the root .env).
+const PATCH_TOKEN: string | undefined = import.meta.env.VITE_PATCH_TOKEN;
+
+async function decidePatch(
+    patchId: string,
+    decision: 'approve' | 'reject' | 'rollback',
+): Promise<ProposedPatch | null> {
+  if (!PATCH_TOKEN) {
+    console.error('VITE_PATCH_TOKEN not set — cannot call patch endpoints');
+    return null;
+  }
   try {
     const res = await fetch(`http://localhost:8081/api/patches/${patchId}/${decision}`, {
       method: 'POST',
-      signal: AbortSignal.timeout(5000),
+      headers: { 'Authorization': `Bearer ${PATCH_TOKEN}` },
+      signal: AbortSignal.timeout(15000),    // applier may need time for write + backup
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      console.error(`Patch ${decision} failed`, res.status, res.headers.get('X-Reason'));
+      return res.json().catch(() => null);    // server still returns the row on 409/500
+    }
     return res.json();
-  } catch { return null; }
+  } catch (e) {
+    console.error(`Patch ${decision} exception`, e);
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1590,14 +1611,111 @@ function ReportMarkdown({ source, accent }: { source: string; accent: string }) 
 // of the agent's proposed patch with Approve / Reject buttons. Phase 1 records
 // the decision only; Phase 2 will hook APPROVED rows into a PatchApplier that
 // writes to disk and triggers a Spring DevTools restart.
+// Unified diff renderer — computes per-line changes between oldContent and
+// newContent, then keeps only changed lines + 3 lines of context. Long
+// unchanged sections collapse to a "⋯" separator. This avoids the previous
+// problem where the panel rendered both copies of an entire 200-line file
+// when only one or two lines actually changed.
+type DiffLine = { type: '+' | '-' | ' '; text: string };
+
+function computeDiffLines(oldText: string, newText: string): DiffLine[] {
+  const parts = diffLines(oldText, newText, { newlineIsToken: false });
+  const out: DiffLine[] = [];
+  for (const part of parts) {
+    const partLines = part.value.split('\n');
+    // diffLines leaves a trailing empty string when content ends with \n; drop it.
+    if (partLines.length > 0 && partLines[partLines.length - 1] === '') partLines.pop();
+    const type: DiffLine['type'] = part.added ? '+' : part.removed ? '-' : ' ';
+    for (const text of partLines) out.push({ type, text });
+  }
+  return out;
+}
+
+function buildHunks(lines: DiffLine[], context = 3): (DiffLine | { separator: true })[] {
+  const keep = new Set<number>();
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].type !== ' ') {
+      const lo = Math.max(0, i - context);
+      const hi = Math.min(lines.length - 1, i + context);
+      for (let j = lo; j <= hi; j++) keep.add(j);
+    }
+  }
+  const result: (DiffLine | { separator: true })[] = [];
+  let lastEmitted = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (!keep.has(i)) continue;
+    if (lastEmitted >= 0 && i > lastEmitted + 1) result.push({ separator: true });
+    result.push(lines[i]);
+    lastEmitted = i;
+  }
+  return result;
+}
+
+function UnifiedDiffView({ oldContent, newContent }: { oldContent: string; newContent: string }) {
+  const hunks = useMemo(
+    () => buildHunks(computeDiffLines(oldContent ?? '', newContent ?? ''), 3),
+    [oldContent, newContent],
+  );
+
+  if (hunks.length === 0) {
+    return (
+      <div style={{ fontSize: '10px', color: '#6b7280', padding: '6px 0', fontStyle: 'italic' }}>
+        no textual difference
+      </div>
+    );
+  }
+
+  return (
+    <pre style={{
+      fontFamily: "'JetBrains Mono', Consolas, monospace",
+      fontSize: '10px',
+      lineHeight: 1.4,
+      margin: '4px 0 8px 0',
+      padding: '8px 0',
+      background: 'rgba(0,0,0,0.35)',
+      border: '1px solid rgba(255,255,255,0.06)',
+      borderRadius: '3px',
+      overflowX: 'auto',
+      maxHeight: '420px',
+      overflowY: 'auto',
+    }}>
+      {hunks.map((h, i) => {
+        if ('separator' in h) {
+          return (
+            <div key={i} style={{ color: '#475569', padding: '2px 8px', userSelect: 'none' }}>
+              ⋯
+            </div>
+          );
+        }
+        const isAdd = h.type === '+';
+        const isDel = h.type === '-';
+        const bg = isAdd ? 'rgba(34,197,94,0.12)' : isDel ? 'rgba(239,68,68,0.12)' : 'transparent';
+        const color = isAdd ? '#86efac' : isDel ? '#fca5a5' : '#9aa5b1';
+        return (
+          <div key={i} style={{
+            background: bg,
+            color,
+            padding: '0 8px',
+            whiteSpace: 'pre',
+          }}>
+            <span style={{ display: 'inline-block', width: '14px', opacity: 0.6 }}>{h.type}</span>
+            {h.text}
+          </div>
+        );
+      })}
+    </pre>
+  );
+}
+
 function PatchPanel({ patch, onDecision }: {
   patch: ProposedPatch;
   onDecision: (next: ProposedPatch) => void;
 }) {
   const [busy, setBusy] = useState(false);
   const isPending = patch.status === 'PENDING_REVIEW';
+  const isApplied = patch.status === 'APPLIED';
 
-  const decide = async (decision: 'approve' | 'reject') => {
+  const decide = async (decision: 'approve' | 'reject' | 'rollback') => {
     if (busy) return;
     setBusy(true);
     const updated = await decidePatch(patch.id, decision);
@@ -1605,30 +1723,18 @@ function PatchPanel({ patch, onDecision }: {
     if (updated) onDecision(updated);
   };
 
-  // Status colour mapping reuses the section accents: yellow = pending, green
-  // = approved, red = rejected. APPLIED / ROLLED_BACK only matter in Phase 2+.
+  // Status colour mapping reuses the section accents: yellow = pending review,
+  // blue = applying (transient), green = applied, red = rejected,
+  // orange = rolled back (still distinct from rejected — patch was approved
+  // but reverted, vs. never approved at all).
   const statusColor =
       patch.status === 'PENDING_REVIEW' ? '#eab308'
+    : patch.status === 'APPLYING'        ? '#3b82f6'
     : patch.status === 'APPROVED'        ? '#22c55e'
     : patch.status === 'APPLIED'         ? '#22c55e'
     : patch.status === 'REJECTED'        ? '#ef4444'
-    : patch.status === 'ROLLED_BACK'     ? '#ef4444'
+    : patch.status === 'ROLLED_BACK'     ? '#f97316'
     : '#6b7280';
-
-  const codeBlockStyle = (border: string): React.CSSProperties => ({
-    fontFamily: "'JetBrains Mono', Consolas, monospace",
-    fontSize: '10px',
-    color: '#c9d1d9',
-    background: 'rgba(0,0,0,0.35)',
-    border: `1px solid ${border}`,
-    borderRadius: '3px',
-    padding: '8px 10px',
-    margin: '4px 0 8px 0',
-    overflowX: 'auto',
-    whiteSpace: 'pre',
-    maxHeight: '260px',
-    overflowY: 'auto',
-  });
 
   return (
     <div style={{
@@ -1667,15 +1773,10 @@ function PatchPanel({ patch, onDecision }: {
         </div>
       )}
 
-      {patch.oldContent && (
-        <>
-          <div style={{ fontSize: '9px', letterSpacing: '0.1em', color: '#ef4444', marginBottom: '2px' }}>− BEFORE</div>
-          <pre style={codeBlockStyle('rgba(239,68,68,0.25)')}>{patch.oldContent}</pre>
-        </>
-      )}
-
-      <div style={{ fontSize: '9px', letterSpacing: '0.1em', color: '#22c55e', marginBottom: '2px' }}>+ AFTER</div>
-      <pre style={codeBlockStyle('rgba(34,197,94,0.25)')}>{patch.newContent}</pre>
+      <div style={{ fontSize: '9px', letterSpacing: '0.1em', color: '#9aa5b1', marginBottom: '2px' }}>
+        DIFF
+      </div>
+      <UnifiedDiffView oldContent={patch.oldContent ?? ''} newContent={patch.newContent} />
 
       {isPending && (
         <div style={{ display: 'flex', gap: '6px', marginTop: '6px' }}>
@@ -1722,9 +1823,53 @@ function PatchPanel({ patch, onDecision }: {
         </div>
       )}
 
+      {/* Rollback is only valid from APPLIED — restores the file from backup. */}
+      {isApplied && (
+        <div style={{ display: 'flex', gap: '6px', marginTop: '6px' }}>
+          <button
+            onClick={() => decide('rollback')}
+            disabled={busy}
+            style={{
+              flex: 1,
+              padding: '6px 8px',
+              fontFamily: "'JetBrains Mono', Consolas, monospace",
+              fontSize: '10px',
+              letterSpacing: '0.1em',
+              fontWeight: 600,
+              color: '#f97316',
+              background: 'rgba(249,115,22,0.1)',
+              border: '1px solid rgba(249,115,22,0.4)',
+              borderRadius: '3px',
+              cursor: busy ? 'wait' : 'pointer',
+              opacity: busy ? 0.5 : 1,
+            }}
+          >
+            ROLLBACK
+          </button>
+        </div>
+      )}
+
       {!isPending && patch.decidedAt && (
         <div style={{ fontSize: '9px', color: '#6b7280', marginTop: '4px', letterSpacing: '0.06em' }}>
           DECIDED {relativeTime(patch.decidedAt)}
+        </div>
+      )}
+
+      {/* APPLIED is the moment to remind the operator that lab-rat still needs
+          to be rebuilt for the change to take effect — the patch is on disk
+          but the running JVM has the old code. Phase 3 will automate this. */}
+      {isApplied && (
+        <div style={{
+          marginTop: '6px',
+          padding: '5px 8px',
+          fontSize: '10px',
+          color: '#fbbf24',
+          background: 'rgba(251,191,36,0.06)',
+          border: '1px solid rgba(251,191,36,0.25)',
+          borderRadius: '3px',
+          lineHeight: 1.4,
+        }}>
+          File written. Run <code style={{ color: '#e6edf3' }}>docker compose up -d --build lab-rat</code> to deploy.
         </div>
       )}
     </div>

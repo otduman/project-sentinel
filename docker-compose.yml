@@ -115,6 +115,10 @@ services:
       - "8081:8081"
     volumes:
       - lab-rat-logs:/logs
+      # Phase 2 patch applier: bind-mount lab-rat source so APPROVED patches
+      # can be written back to disk. Backups go to .sentinel-backups inside
+      # this same mount. Read-write — this IS the file-write surface.
+      - ./lab-rat/src:/lab-rat-src
     env_file:
       - .env
     environment:

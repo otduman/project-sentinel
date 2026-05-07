@@ -5,7 +5,14 @@
 # --- Secrets (NEVER commit) ---
 .env
 .env.local
+.env.development
+.env.production
 .env.*.local
+
+# --- Phase 2 patch backups (written by PatchApplier into the bind-mounted
+#     lab-rat source tree). Never commit — these contain timestamped pre-images
+#     of patched files and the directory rewrites itself on every apply. ---
+lab-rat/src/.sentinel-backups/
 
 # --- Gradle (root-level cache and build) ---
 .gradle/

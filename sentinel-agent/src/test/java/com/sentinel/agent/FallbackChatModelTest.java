@@ -74,6 +74,26 @@ class FallbackChatModelTest {
     }
 
     @Test
+    void httpTimeoutException_fallsBackToSecondary() {
+        // Real motivating case: preview Gemini models occasionally take longer
+        // than the JDK HttpClient timeout, surfacing as HttpTimeoutException with
+        // a "request timed out" message. We must fall back so a slow primary
+        // doesn't fail the whole investigation.
+        ChatModel primary = mock(ChatModel.class);
+        ChatModel secondary = mock(ChatModel.class);
+        ChatResponse fallbackResponse = mock(ChatResponse.class);
+        when(primary.chat(any(ChatRequest.class)))
+                .thenThrow(new RuntimeException("call failed",
+                        new java.net.http.HttpTimeoutException("request timed out")));
+        when(secondary.chat(any(ChatRequest.class))).thenReturn(fallbackResponse);
+
+        FallbackChatModel model = new FallbackChatModel(primary, secondary);
+        model.chat(request);
+
+        assertThat(model.getFallbackCount()).isEqualTo(1);
+    }
+
+    @Test
     void serviceUnavailable_fallsBackToSecondary() {
         ChatModel primary = mock(ChatModel.class);
         ChatModel secondary = mock(ChatModel.class);

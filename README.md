@@ -2,6 +2,8 @@
 
 Project Sentinel is an autonomous AI Site Reliability Engineer. It monitors a Spring Boot microservice (lab-rat), receives firing alerts from Prometheus via AlertManager, and uses a LangChain4j + Google Gemini agent to investigate root causes — fetching logs, dynamically profiling the live JVM, and proposing source-level code fixes — without human intervention. A real-time hex-grid dashboard tracks the health of every component.
 
+> **⚠️ Demo / portfolio project.** The agent API and dashboard run unauthenticated on read endpoints. The Phase 2 patch flow can write to the lab-rat source tree on disk. **Do not expose ports 8081 or 5173 to untrusted networks.** Set `AGENT_PATCH_SECRET` and `AGENT_WEBHOOK_SECRET` to 32+ char random values before any non-loopback use. See [SECURITY.md](SECURITY.md) for the full pre-deployment checklist and known debt.
+
 ## Architecture
 
 | Component | Role |

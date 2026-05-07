@@ -34,17 +34,22 @@ public interface InvestigationRepository extends JpaRepository<Investigation, UU
     /**
      * Returns the most recent investigation for the given alert name whose
      * {@code alertResolvedAt} is still {@code null} (i.e. the alert episode is
-     * still considered firing) AND that started within the cutoff. Used by
-     * {@code InvestigationService.start} as the episode-based dedupe primary
-     * gate.
+     * still considered firing), whose status is NOT {@code FAILED}, AND that
+     * started within the cutoff. Used by {@code InvestigationService.start}
+     * as the episode-based dedupe primary gate.
      *
-     * <p>The {@code startedAt > since} clause is a 24-hour backstop: if a
+     * <p>The status exclusion matters: a FAILED investigation means the AI
+     * call itself errored (timeout / 5xx / etc.) before producing a diagnosis.
+     * Treating it as "active" would dedupe forever and mask the real alert.
+     * Excluding it here lets the next firing webhook spawn a fresh attempt.
+     *
+     * <p>The {@code startedAt > since} clause is the 3-hour backstop: if a
      * {@code resolved} webhook ever gets lost, an active episode would
      * otherwise dedupe forever. Bounding to a generous window self-heals
      * those edge cases without requiring manual intervention.
      */
-    Optional<Investigation> findFirstByAlertNameAndAlertResolvedAtIsNullAndStartedAtAfterOrderByStartedAtDesc(
-            String alertName, Instant since);
+    Optional<Investigation> findFirstByAlertNameAndAlertResolvedAtIsNullAndStatusNotAndStartedAtAfterOrderByStartedAtDesc(
+            String alertName, String excludedStatus, Instant since);
 
     /**
      * All currently-firing investigations for an alertName (those with

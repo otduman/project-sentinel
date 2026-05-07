@@ -56,7 +56,12 @@ public final class PatchPathValidator {
             throw new IllegalArgumentException("filePath must not contain '..' (path traversal)");
         }
 
-        // Strip any leading variant of the lab-rat source root.
+        // Strip every leading layer that matches a known prefix. The previous
+        // single-pass version broke on the first match, so a fully qualified
+        // path like /lab-rat-src/main/java/com/sentinel/lab_rat/Foo.java only
+        // had `/lab-rat-src/` stripped — leaving slashes in `tail` that then
+        // failed the classname regex. Iterating until no prefix matches lets
+        // any nesting of valid prefixes collapse to just the classname.
         String tail = trimmed;
         String[] knownPrefixes = {
                 "/lab-rat-src/",
@@ -64,12 +69,17 @@ public final class PatchPathValidator {
                 LAB_RAT_PACKAGE_DIR + "/",
                 "com/sentinel/lab_rat/",
         };
-        for (String p : knownPrefixes) {
-            if (tail.startsWith(p)) {
-                tail = tail.substring(p.length());
-                break;
+        boolean stripped;
+        do {
+            stripped = false;
+            for (String p : knownPrefixes) {
+                if (tail.startsWith(p)) {
+                    tail = tail.substring(p.length());
+                    stripped = true;
+                    break;
+                }
             }
-        }
+        } while (stripped);
 
         // After prefix-stripping, tail should be a class name (with optional
         // sub-path under com/sentinel/lab_rat). We don't permit sub-packages

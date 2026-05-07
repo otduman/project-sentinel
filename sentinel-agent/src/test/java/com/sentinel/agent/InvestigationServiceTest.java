@@ -43,8 +43,8 @@ class InvestigationServiceTest {
 
     @Test
     void start_persistsPendingInvestigation() {
-        when(repository.findFirstByAlertNameAndAlertResolvedAtIsNullAndStartedAtAfterOrderByStartedAtDesc(
-                eq("HighCpuAlert"), any(java.time.Instant.class))).thenReturn(Optional.empty());
+        when(repository.findFirstByAlertNameAndAlertResolvedAtIsNullAndStatusNotAndStartedAtAfterOrderByStartedAtDesc(
+                eq("HighCpuAlert"), eq("FAILED"), any(java.time.Instant.class))).thenReturn(Optional.empty());
         when(repository.save(any(Investigation.class))).thenAnswer(inv -> {
             Investigation arg = inv.getArgument(0);
             arg.setId(id);
@@ -73,8 +73,8 @@ class InvestigationServiceTest {
         Investigation existing = Investigation.create("HighCpuAlert", "critical");
         existing.setId(id);
         // alertResolvedAt is null by default → episode is still active
-        when(repository.findFirstByAlertNameAndAlertResolvedAtIsNullAndStartedAtAfterOrderByStartedAtDesc(
-                eq("HighCpuAlert"), any(java.time.Instant.class)))
+        when(repository.findFirstByAlertNameAndAlertResolvedAtIsNullAndStatusNotAndStartedAtAfterOrderByStartedAtDesc(
+                eq("HighCpuAlert"), eq("FAILED"), any(java.time.Instant.class)))
                 .thenReturn(Optional.of(existing));
 
         InvestigationService.StartResult result = service.start("HighCpuAlert", "critical");
@@ -85,12 +85,36 @@ class InvestigationServiceTest {
     }
 
     @Test
+    void start_excludesFailedInvestigationsFromDedupe() {
+        // Locks in: a previous FAILED investigation must NOT be reused.
+        // The finder receives "FAILED" as the excluded status — verifying this
+        // captures the contract; the actual SQL behaviour is tested via Spring
+        // Data's derived-query naming.
+        when(repository.findFirstByAlertNameAndAlertResolvedAtIsNullAndStatusNotAndStartedAtAfterOrderByStartedAtDesc(
+                eq("HighCpuAlert"), eq("FAILED"), any(java.time.Instant.class)))
+                .thenReturn(Optional.empty());
+        when(repository.save(any(Investigation.class))).thenAnswer(inv -> {
+            Investigation arg = inv.getArgument(0);
+            arg.setId(id);
+            return arg;
+        });
+
+        InvestigationService.StartResult result = service.start("HighCpuAlert", "critical");
+
+        assertThat(result.wasReused()).isFalse();
+        // Verify the call was made with "FAILED" as the excluded status — if
+        // someone changes the contract, this assertion catches it.
+        verify(repository).findFirstByAlertNameAndAlertResolvedAtIsNullAndStatusNotAndStartedAtAfterOrderByStartedAtDesc(
+                eq("HighCpuAlert"), eq("FAILED"), any(java.time.Instant.class));
+    }
+
+    @Test
     void start_createsFreshInvestigationAfterEpisodeResolved() {
         // After resolveEpisode runs, the previous investigation has alertResolvedAt
         // set, so the active-episode finder returns empty. Next firing webhook
         // must create a fresh investigation.
-        when(repository.findFirstByAlertNameAndAlertResolvedAtIsNullAndStartedAtAfterOrderByStartedAtDesc(
-                eq("HighCpuAlert"), any(java.time.Instant.class)))
+        when(repository.findFirstByAlertNameAndAlertResolvedAtIsNullAndStatusNotAndStartedAtAfterOrderByStartedAtDesc(
+                eq("HighCpuAlert"), eq("FAILED"), any(java.time.Instant.class)))
                 .thenReturn(Optional.empty());
         when(repository.save(any(Investigation.class))).thenAnswer(inv -> {
             Investigation arg = inv.getArgument(0);
