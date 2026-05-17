@@ -842,11 +842,26 @@ interface HexStyle {
 // HexMap — SVG-based infrastructure map
 // ---------------------------------------------------------------------------
 
+// Module-level so both HexMap (hex border glow) and CommandSidebar (sidebar
+// filtering) use the same alert→service association.
+const SERVICE_ALERT_KEYWORDS_MAP: Record<string, string[]> = {
+  'lab-rat': ['lab', 'rat', 'heap', 'memory', 'cpu', 'jvm', 'thread', 'deadlock', 'gc'],
+  'sentinel-agent': ['sentinel', 'agent'],
+};
+
+export function alertBelongsToService(alertname: string, serviceId: string): boolean {
+  const lower = alertname.toLowerCase();
+  const keywords = SERVICE_ALERT_KEYWORDS_MAP[serviceId] ?? [serviceId.toLowerCase()];
+  return keywords.some(kw => lower.includes(kw));
+}
+
 interface HexMapProps {
   services: Record<ServiceId, ServiceState>;
   alerts: AlertEntry[];
   activeInvestigationCount: number;
   heapMB: number | null;
+  selectedFilter: string | null;
+  onServiceClick: (id: string) => void;
 }
 
 /**
@@ -865,7 +880,7 @@ function liveMetricFor(id: string, heapMB: number | null, activeInvestigationCou
   return null;
 }
 
-function HexMap({ services, alerts, activeInvestigationCount, heapMB }: HexMapProps) {
+function HexMap({ services, alerts, activeInvestigationCount, heapMB, selectedFilter, onServiceClick }: HexMapProps) {
   const [transform, setTransform] = useState({ x: 0, y: 0, scale: 1 });
   const [isDragging, setIsDragging] = useState(false);
   const dragging = useRef(false);
@@ -929,14 +944,10 @@ function HexMap({ services, alerts, activeInvestigationCount, heapMB }: HexMapPr
     alerts.filter(a => a.state === 'active').map(a => a.alertname.toLowerCase())
   );
 
+  // Uses the module-level alertBelongsToService helper so the same logic
+  // drives hex border glow AND sidebar filtering.
   const serviceHasAlert = (id: ServiceId): boolean => {
-    if (id === 'lab-rat') {
-      return [...activeAlertNames].some(n =>
-        n.includes('lab') || n.includes('rat') || n.includes('heap') ||
-        n.includes('memory') || n.includes('cpu') || n.includes('jvm')
-      );
-    }
-    return false;
+    return [...activeAlertNames].some(n => alertBelongsToService(n, id));
   };
 
   // Compute live pixel centers. Iterates the *current services list* (not
@@ -1324,6 +1335,19 @@ function HexMap({ services, alerts, activeInvestigationCount, heapMB }: HexMapPr
                       strokeLinejoin="round"
                     />
                   )}
+                  {/* Selected-filter ring — bright accent border when this
+                      service is the active sidebar filter. Drawn outside the
+                      base hex so it doesn't interact with the other strokes. */}
+                  {selectedFilter === id && (
+                    <polygon
+                      points={hexVertices(cx, ty, HEX_SIZE + 4)}
+                      fill="none"
+                      stroke={serviceConfigs[id]?.accent ?? '#3b82f6'}
+                      strokeWidth={2}
+                      strokeDasharray="4 3"
+                      opacity={0.85}
+                    />
+                  )}
                 </g>
               );
             })}
@@ -1385,6 +1409,15 @@ function HexMap({ services, alerts, activeInvestigationCount, heapMB }: HexMapPr
                     setHoveredHex(null);
                     const svgPos = toSvgCoords(e.clientX, e.clientY);
                     setDraggingBlock({ id, x: svgPos.x, y: svgPos.y });
+                  }}
+                  onClick={(e) => {
+                    // Only treat as a click if the user didn't actually drag the
+                    // hex — dragging.current flips true once mouse-move passes
+                    // the drag threshold elsewhere. Without this check, every
+                    // drag-release would also toggle the sidebar filter.
+                    if (dragging.current) return;
+                    e.stopPropagation();
+                    onServiceClick(id);
                   }}
                 >
                   {/* Invisible hit area — full hex shape for reliable mouse events */}
@@ -1999,9 +2032,11 @@ interface CommandSidebarProps {
   investigations: Investigation[];
   activeCount: number;
   sseConnected: boolean;
+  selectedFilter: string | null;
+  onClearFilter: () => void;
 }
 
-function CommandSidebar({ alerts, investigations, activeCount, sseConnected }: CommandSidebarProps) {
+function CommandSidebar({ alerts, investigations, activeCount, sseConnected, selectedFilter, onClearFilter }: CommandSidebarProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [patch, setPatch] = useState<ProposedPatch | null>(null);
   const mono = "'JetBrains Mono', 'Courier New', monospace";
@@ -2168,12 +2203,59 @@ function CommandSidebar({ alerts, investigations, activeCount, sseConnected }: C
             </div>
           ) : (
             <div style={{ flex: 1, overflowY: 'auto' }}>
-              {investigations.length === 0 ? (
-                <div style={{ padding: '20px 14px', fontSize: '10px', color: '#6b7280', letterSpacing: '0.1em', textAlign: 'center' }}>
-                  NO INVESTIGATIONS YET
+              {/* Filter pill — visible only when a service hex is selected.
+                  Clicking ✕ clears the filter and restores the full list. */}
+              {selectedFilter && (
+                <div style={{
+                  padding: '6px 12px',
+                  borderBottom: '1px solid #111c27',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  fontSize: '9px',
+                  letterSpacing: '0.08em',
+                  color: '#9aa5b1',
+                }}>
+                  <span style={{ color: '#6b7280' }}>FILTERED BY</span>
+                  <span style={{
+                    padding: '1px 6px',
+                    borderRadius: '3px',
+                    background: 'rgba(59,130,246,0.15)',
+                    color: '#3b82f6',
+                    border: '1px solid rgba(59,130,246,0.3)',
+                    fontWeight: 600,
+                  }}>
+                    {selectedFilter.toUpperCase()}
+                  </span>
+                  <button
+                    onClick={onClearFilter}
+                    style={{
+                      marginLeft: 'auto',
+                      background: 'none',
+                      border: 'none',
+                      color: '#6b7280',
+                      cursor: 'pointer',
+                      fontFamily: mono,
+                      fontSize: '12px',
+                    }}
+                    title="Clear filter"
+                  >
+                    ✕
+                  </button>
                 </div>
-              ) : (
-                investigations.map(inv => (
+              )}
+              {(() => {
+                const filtered = selectedFilter
+                  ? investigations.filter(i => alertBelongsToService(i.alertName, selectedFilter))
+                  : investigations;
+                if (filtered.length === 0) {
+                  return (
+                    <div style={{ padding: '20px 14px', fontSize: '10px', color: '#6b7280', letterSpacing: '0.1em', textAlign: 'center' }}>
+                      {selectedFilter ? `NO INVESTIGATIONS FOR ${selectedFilter.toUpperCase()}` : 'NO INVESTIGATIONS YET'}
+                    </div>
+                  );
+                }
+                return filtered.map(inv => (
                   <div
                     key={inv.id}
                     onClick={() => setSelectedId(inv.id)}
@@ -2212,8 +2294,8 @@ function CommandSidebar({ alerts, investigations, activeCount, sseConnected }: C
                       <span style={{ fontSize: '9px', color: '#6b7280' }}>{relativeTime(inv.startedAt)}</span>
                     </div>
                   </div>
-                ))
-              )}
+                ));
+              })()}
             </div>
           )}
         </>
@@ -2313,6 +2395,13 @@ export default function App() {
   const { investigations, activeInvestigationCount, sseConnected } = useInvestigations();
   const topology = useTopology();
 
+  // Filter state — when a hex is clicked, the sidebar narrows to that
+  // service's investigations. Click the same hex again to clear.
+  const [selectedFilter, setSelectedFilter] = useState<string | null>(null);
+  const handleServiceClick = useCallback((id: string) => {
+    setSelectedFilter(prev => (prev === id ? null : id));
+  }, []);
+
   // Services Record is derived from the topology API now — no hardcoded list,
   // no direct browser probes. Whatever Prometheus is scraping shows up as a
   // hex; whatever it stops scraping disappears. While the first /api/topology
@@ -2370,12 +2459,21 @@ export default function App() {
 
       {/* Main content: SVG map + alert panel + investigation sidebar */}
       <div className="main-layout">
-        <HexMap services={services} alerts={alerts} activeInvestigationCount={activeInvestigationCount} heapMB={heapMB} />
+        <HexMap
+          services={services}
+          alerts={alerts}
+          activeInvestigationCount={activeInvestigationCount}
+          heapMB={heapMB}
+          selectedFilter={selectedFilter}
+          onServiceClick={handleServiceClick}
+        />
         <CommandSidebar
           alerts={alerts}
           investigations={investigations}
           activeCount={activeInvestigationCount}
           sseConnected={sseConnected}
+          selectedFilter={selectedFilter}
+          onClearFilter={() => setSelectedFilter(null)}
         />
       </div>
 
