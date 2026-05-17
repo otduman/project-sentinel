@@ -56,10 +56,10 @@ public class AgentConfiguration {
     }
 
     @Bean
-    ChatModel geminiChatModel() {
+    ChatModel geminiChatModel(SentinelMetrics metrics) {
         ChatModel primary = buildGemini(primaryModelName);
         ChatModel secondary = buildGemini(fallbackModelName);
-        ChatModel withFallback = new FallbackChatModel(primary, secondary);
+        ChatModel withFallback = new FallbackChatModel(primary, secondary, metrics);
         return new BudgetedChatModel(withFallback, tokenBudget);
     }
 

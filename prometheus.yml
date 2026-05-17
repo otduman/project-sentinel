@@ -34,3 +34,12 @@ scrape_configs:
     static_configs:
       # lab-rat is a named container on sentinel-net — Docker DNS resolves it directly
       - targets: ['lab-rat:8080']
+
+  # Self-observability: scrape the agent's own /actuator/prometheus so its
+  # investigation duration, token spend, fallback rate, and success/fail
+  # counts land in the same Prometheus that watches lab-rat. The dashboard
+  # then renders these alongside everything else — the SRE watching itself.
+  - job_name: 'sentinel-agent'
+    metrics_path: '/actuator/prometheus'
+    static_configs:
+      - targets: ['sentinel-agent:8081']

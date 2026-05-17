@@ -24,6 +24,9 @@ class InvestigationServiceTest {
     @Mock
     private InvestigationRepository repository;
 
+    @Mock
+    private SentinelMetrics metrics;
+
     @InjectMocks
     private InvestigationService service;
 

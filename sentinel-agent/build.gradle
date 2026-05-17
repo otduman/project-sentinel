@@ -27,7 +27,12 @@ configurations {
 dependencies {
 	implementation 'org.springframework.boot:spring-boot-starter-web'
 	implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+	implementation 'org.springframework.boot:spring-boot-starter-actuator'
 	implementation 'com.fasterxml.jackson.core:jackson-databind'
+
+	// Micrometer's Prometheus registry — converts SentinelMetrics counters/timers
+	// into the text format Prometheus scrapes from /actuator/prometheus.
+	implementation 'io.micrometer:micrometer-registry-prometheus'
 
 	// LangChain4j 1.13.x — Spring Boot starter dropped because it's not compatible
 	// with Spring Boot 4.0 (langchain4j/langchain4j#4268). We wire beans manually

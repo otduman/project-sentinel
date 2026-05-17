@@ -62,6 +62,7 @@ public class InvestigationService {
 
     private final InvestigationRepository repository;
     private final BudgetedChatModel budgetedChatModel;
+    private final SentinelMetrics metrics;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     // Thread-safe list of active SSE connections.
@@ -75,11 +76,13 @@ public class InvestigationService {
     public record StartResult(Investigation investigation, boolean wasReused) {}
 
     public InvestigationService(InvestigationRepository repository,
-                                dev.langchain4j.model.chat.ChatModel chatModel) {
+                                dev.langchain4j.model.chat.ChatModel chatModel,
+                                SentinelMetrics metrics) {
         this.repository = repository;
         // The Spring ChatModel bean is wrapped by BudgetedChatModel — downcast so we
         // can release per-memory-id token counters when an investigation terminates.
         this.budgetedChatModel = (chatModel instanceof BudgetedChatModel b) ? b : null;
+        this.metrics = metrics;
     }
 
     @PreDestroy
@@ -125,11 +128,13 @@ public class InvestigationService {
             System.out.println("[Sentinel] Deduped webhook for alert='" + alertName
                     + "' — reusing investigation " + existing.getId()
                     + " (status=" + existing.getStatus() + ", episode still active)");
+            metrics.recordInvestigationDeduped(alertName);
             return new StartResult(existing, true);
         }
         Investigation inv = Investigation.create(alertName, severity);
         inv = repository.save(inv);
         broadcast("investigation_started", inv);
+        metrics.recordInvestigationStarted(alertName);
         return new StartResult(inv, false);
     }
 
@@ -173,10 +178,15 @@ public class InvestigationService {
             inv.setRootCause(sections.getOrDefault("rootcause", null));
             inv.setProposedFix(sections.getOrDefault("proposedfix", null));
             inv.setStatus("COMPLETE");
-            inv.setCompletedAt(Instant.now());
+            Instant now = Instant.now();
+            inv.setCompletedAt(now);
             Investigation saved = repository.save(inv);
             releaseBudget(id.toString());
             broadcast("investigation_complete", saved);
+            long durationMillis = inv.getStartedAt() == null
+                    ? 0
+                    : java.time.Duration.between(inv.getStartedAt(), now).toMillis();
+            metrics.recordInvestigationCompleted(inv.getAlertName(), durationMillis);
         });
     }
 
@@ -187,13 +197,38 @@ public class InvestigationService {
     public void fail(UUID id, String error) {
         repository.findById(id).ifPresent(inv -> {
             inv.setStatus("FAILED");
-            inv.setCompletedAt(Instant.now());
+            Instant now = Instant.now();
+            inv.setCompletedAt(now);
             // Store the error message in symptoms so the dashboard can display it.
             inv.setSymptoms("Investigation failed: " + error);
             Investigation saved = repository.save(inv);
             releaseBudget(id.toString());
             broadcast("investigation_failed", saved);
+            long durationMillis = inv.getStartedAt() == null
+                    ? 0
+                    : java.time.Duration.between(inv.getStartedAt(), now).toMillis();
+            // Classify the failure into a small set of high-level reasons —
+            // raw error messages would explode the tag cardinality and make
+            // Prometheus unhappy.
+            metrics.recordInvestigationFailed(inv.getAlertName(), durationMillis, classifyFailureReason(error));
         });
+    }
+
+    /**
+     * Maps a raw exception message to a small, finite set of buckets so we
+     * don't blow out Prometheus cardinality. The point of the tag is to
+     * answer "is this a timeout / quota / budget / other problem?" not to
+     * surface the full stack trace.
+     */
+    private String classifyFailureReason(String error) {
+        if (error == null) return "unknown";
+        String lower = error.toLowerCase();
+        if (lower.contains("token budget") || lower.contains("tokenbudget")) return "budget_exceeded";
+        if (lower.contains("timeout") || lower.contains("timed out")) return "timeout";
+        if (lower.contains("rate") || lower.contains("429") || lower.contains("resource_exhausted")) return "rate_limited";
+        if (lower.contains("invalid_argument") || lower.contains("400")) return "bad_request";
+        if (lower.contains("unauthorized") || lower.contains("401") || lower.contains("403")) return "auth";
+        return "other";
     }
 
     /**

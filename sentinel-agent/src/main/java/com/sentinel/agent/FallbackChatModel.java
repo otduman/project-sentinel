@@ -29,24 +29,35 @@ public class FallbackChatModel implements ChatModel {
     private final ChatModel primary;
     private final ChatModel secondary;
     private final AtomicLong fallbackCount = new AtomicLong();
+    /** Optional — null in unit tests, wired by AgentConfiguration in production. */
+    private final SentinelMetrics metrics;
 
     public FallbackChatModel(ChatModel primary, ChatModel secondary) {
+        this(primary, secondary, null);
+    }
+
+    public FallbackChatModel(ChatModel primary, ChatModel secondary, SentinelMetrics metrics) {
         this.primary = primary;
         this.secondary = secondary;
+        this.metrics = metrics;
     }
 
     @Override
     public ChatResponse chat(ChatRequest chatRequest) {
         try {
-            return primary.chat(chatRequest);
+            ChatResponse response = primary.chat(chatRequest);
+            if (metrics != null) metrics.recordPrimaryModelCall();
+            return response;
         } catch (RuntimeException e) {
             if (!isRetriable(e)) {
                 throw e;
             }
             fallbackCount.incrementAndGet();
+            String reason = classifyRetriableReason(e);
             System.err.println("[Sentinel] Primary model failed with retriable error ("
                     + e.getClass().getSimpleName() + ": " + e.getMessage()
                     + ") — falling back to secondary model.");
+            if (metrics != null) metrics.recordFallbackModelCall(reason);
             return secondary.chat(chatRequest);
         }
     }
@@ -54,6 +65,25 @@ public class FallbackChatModel implements ChatModel {
     /** Total number of times the secondary model has been invoked due to primary failure. */
     public long getFallbackCount() {
         return fallbackCount.get();
+    }
+
+    /**
+     * Buckets a retriable error into one of a small set of reasons so the
+     * fallback counter's "reason" tag stays low cardinality.
+     */
+    private static String classifyRetriableReason(Throwable t) {
+        for (Throwable cur = t; cur != null; cur = cur.getCause()) {
+            String typeName = cur.getClass().getSimpleName().toLowerCase();
+            if (typeName.contains("timeout")) return "timeout";
+            String msg = cur.getMessage();
+            if (msg == null) continue;
+            String lower = msg.toLowerCase();
+            if (lower.contains("timeout") || lower.contains("timed out")) return "timeout";
+            if (lower.contains("429") || lower.contains("rate limit") || lower.contains("rate_limit")) return "rate_limited";
+            if (lower.contains("resource_exhausted") || lower.contains("quota")) return "quota";
+            if (lower.contains("503") || lower.contains("unavailable") || lower.contains("overloaded")) return "unavailable";
+        }
+        return "other";
     }
 
     /**

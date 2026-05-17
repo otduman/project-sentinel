@@ -7,7 +7,13 @@ import { diffLines } from 'diff';
 // Types
 // ---------------------------------------------------------------------------
 
-type ServiceId = 'lab-rat' | 'sentinel-agent' | 'prometheus' | 'alertmanager' | 'grafana';
+// ServiceId is open (any string) because services come from the topology API
+// at runtime — whatever Prometheus is scraping. The two well-known names
+// ('lab-rat', 'sentinel-agent') keep first-class styling/positions; everything
+// else falls through to a default palette and a position derived from its
+// index in the discovered list. Infrastructure (Prometheus / AlertManager /
+// Grafana) is never a ServiceId — those render in the compact InfraStrip.
+type ServiceId = string;
 type ServiceStatus = 'UP' | 'DOWN' | 'UNKNOWN';
 
 interface ServiceState {
@@ -25,13 +31,6 @@ interface AlertEntry {
   labels: Record<string, string>;
 }
 
-interface AppState {
-  services: Record<ServiceId, ServiceState>;
-  heapMB: number | null;
-  alerts: AlertEntry[];
-  lastPoll: number;
-}
-
 interface Investigation {
   id: string;
   alertName: string;
@@ -43,6 +42,17 @@ interface Investigation {
   evidence: string | null;
   rootCause: string | null;
   proposedFix: string | null;
+}
+
+// Mirrors com.sentinel.agent.TopologyController.Topology — agent-driven
+// view of "what services exist in this deployment". Replaces hardcoded
+// SERVICE_CONFIG knowledge in the dashboard, paving the way for the dashboard
+// to work against arbitrary Prometheus deployments without code changes.
+interface TopologyServiceNode { name: string; instance: string; healthy: boolean; }
+interface TopologyInfraNode { name: string; url: string; healthy: boolean; }
+interface ApiTopology {
+  services: TopologyServiceNode[];
+  infrastructure: TopologyInfraNode[];
 }
 
 // Mirrors com.sentinel.agent.ProposedPatch — a structured patch the agent
@@ -64,46 +74,98 @@ interface ProposedPatch {
 // Service configuration
 // ---------------------------------------------------------------------------
 
-const SERVICE_CONFIG: Record<ServiceId, { label: string; port: number; color: string; fill: string; borderBase: string; accent: string }> = {
-  'lab-rat':        { label: 'LAB-RAT',       port: 8080, color: '#22c55e', fill: '#0d1f14', borderBase: '#1a3d24', accent: '#22c55e' },
-  'sentinel-agent': { label: 'SENTINEL',       port: 8081, color: '#3b82f6', fill: '#0d1520', borderBase: '#1a2e4a', accent: '#3b82f6' },
-  'prometheus':     { label: 'PROMETHEUS',     port: 9090, color: '#f97316', fill: '#1f1508', borderBase: '#3d2510', accent: '#f97316' },
-  'alertmanager':   { label: 'ALERTMANAGER',   port: 9093, color: '#eab308', fill: '#1f1a06', borderBase: '#3d3010', accent: '#eab308' },
-  'grafana':        { label: 'GRAFANA',        port: 3000, color: '#a855f7', fill: '#160d1f', borderBase: '#2e1a3d', accent: '#a855f7' },
+interface ServiceVisualConfig {
+  label: string;
+  port: number;
+  color: string;
+  fill: string;
+  borderBase: string;
+  accent: string;
+}
+
+// Curated styling for the well-known services. Any service NOT in this map
+// gets a default style cycled from DEFAULT_PALETTE by its discovery index.
+const KNOWN_SERVICES: Record<string, ServiceVisualConfig> = {
+  'lab-rat':        { label: 'LAB-RAT',  port: 8080, color: '#22c55e', fill: '#0d1f14', borderBase: '#1a3d24', accent: '#22c55e' },
+  'sentinel-agent': { label: 'SENTINEL', port: 8081, color: '#3b82f6', fill: '#0d1520', borderBase: '#1a2e4a', accent: '#3b82f6' },
 };
+
+// Fallback palette for services discovered at runtime that don't match a
+// known name. Distinct hues — picked to be visually separable on the dark
+// theme — so two unknown services side by side don't blur together.
+const DEFAULT_PALETTE: Omit<ServiceVisualConfig, 'label' | 'port'>[] = [
+  { color: '#f97316', fill: '#1f1508', borderBase: '#3d2510', accent: '#f97316' }, // orange
+  { color: '#eab308', fill: '#1f1a06', borderBase: '#3d3010', accent: '#eab308' }, // yellow
+  { color: '#a855f7', fill: '#160d1f', borderBase: '#2e1a3d', accent: '#a855f7' }, // purple
+  { color: '#ec4899', fill: '#1f0d18', borderBase: '#3d1a2e', accent: '#ec4899' }, // pink
+  { color: '#06b6d4', fill: '#081f25', borderBase: '#103d4a', accent: '#06b6d4' }, // cyan
+];
+
+function configForService(name: string, index: number): ServiceVisualConfig {
+  if (KNOWN_SERVICES[name]) return KNOWN_SERVICES[name];
+  const palette = DEFAULT_PALETTE[index % DEFAULT_PALETTE.length];
+  return {
+    label: name.toUpperCase().replace(/[_-]/g, ' '),
+    port: 0,
+    ...palette,
+  };
+}
+
+/**
+ * Returns N axial hex coordinates arranged in a hex-flower pattern:
+ *
+ * <pre>
+ *   N=1: just center
+ *   N=2: center + south
+ *   N=3..7: center + ring of up to 6 neighbours
+ *   N>7: simple grid below (rare in practice — Prometheus rarely scrapes >7 services in this demo)
+ * </pre>
+ *
+ * <p>Order is stable so a given service consistently lands in the same slot
+ * across renders, avoiding visual jitter when the topology poll returns the
+ * same set in different order.
+ */
+function hexFlowerPositions(count: number): [number, number][] {
+  if (count <= 0) return [];
+  if (count === 1) return [[0, 0]];
+
+  // Center first, then up to 6 axial neighbours in a stable clockwise order
+  // starting from "south" (matches the old SENTINEL-above-LAB-RAT layout).
+  const ring: [number, number][] = [
+    [0,  2],   // south
+    [2,  0],   // east
+    [2, -2],   // north-east
+    [0, -2],   // north
+    [-2, 0],   // west
+    [-2, 2],   // south-west
+  ];
+
+  const positions: [number, number][] = [[0, 0]];
+  for (let i = 0; i < Math.min(count - 1, 6); i++) positions.push(ring[i]);
+
+  // For 8+ services, lay extras in a grid below the flower.
+  if (count > 7) {
+    let extra = count - 7;
+    let row = 4;
+    let col = -2;
+    while (extra-- > 0) {
+      positions.push([col, row]);
+      col += 2;
+      if (col > 2) { col = -2; row += 2; }
+    }
+  }
+  return positions;
+}
 
 // ---------------------------------------------------------------------------
 // Polling helpers
 // ---------------------------------------------------------------------------
 
-async function checkLabRat(): Promise<ServiceStatus> {
-  try {
-    const res = await fetch('http://localhost:8080/actuator/health', { signal: AbortSignal.timeout(3000) });
-    if (!res.ok) return 'DOWN';
-    const data = await res.json();
-    return data?.status === 'UP' ? 'UP' : 'DOWN';
-  } catch {
-    return 'DOWN';
-  }
-}
-
-async function checkSentinelAgent(): Promise<ServiceStatus> {
-  try {
-    await fetch('http://localhost:8081/actuator/health', { signal: AbortSignal.timeout(3000) });
-    return 'UP'; // any response, even 404, means alive
-  } catch {
-    return 'DOWN';
-  }
-}
-
-async function checkNoCors(url: string): Promise<ServiceStatus> {
-  try {
-    await fetch(url, { mode: 'no-cors', signal: AbortSignal.timeout(3000) });
-    return 'UP'; // opaque response = alive
-  } catch {
-    return 'DOWN';
-  }
-}
+// Direct lab-rat / sentinel-agent health probes were removed in Step 4 —
+// service health now flows through the agent's /api/topology, which sources
+// it from Prometheus's scrape-target health. Eliminating the direct probes
+// also lets the dashboard CSP drop localhost:8080 from connect-src, leaving
+// only the agent (:8081) as a network destination.
 
 async function fetchHeapMB(): Promise<number | null> {
   try {
@@ -146,6 +208,14 @@ async function fetchInvestigations(): Promise<Investigation[]> {
     if (!res.ok) return [];
     return res.json();
   } catch { return []; }
+}
+
+async function fetchTopology(): Promise<ApiTopology | null> {
+  try {
+    const res = await fetch('http://localhost:8081/api/topology', { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) return null;
+    return res.json();
+  } catch { return null; }
 }
 
 async function fetchPatchForInvestigation(investigationId: string): Promise<ProposedPatch | null> {
@@ -193,19 +263,20 @@ async function decidePatch(
 // useCommandRoom hook — owns all polling state
 // ---------------------------------------------------------------------------
 
+/**
+ * Polls observability data that ISN'T service-list health — heap value for
+ * the lab-rat hex, the live alerts feed, and a "last poll" timestamp.
+ *
+ * <p>Service list + service health used to live here too; that responsibility
+ * moved to {@link useTopology}, which gets its data from the agent's
+ * {@code /api/topology} (sourced from Prometheus targets). The split keeps
+ * one source of truth per concern: topology tells us "what's running",
+ * this hook tells us "what's happening".
+ */
 function useCommandRoom() {
-  const [state, setState] = useState<AppState>({
-    services: {
-      'lab-rat':        { id: 'lab-rat',        status: 'UNKNOWN', lastChecked: 0 },
-      'sentinel-agent': { id: 'sentinel-agent',  status: 'UNKNOWN', lastChecked: 0 },
-      'prometheus':     { id: 'prometheus',      status: 'UNKNOWN', lastChecked: 0 },
-      'alertmanager':   { id: 'alertmanager',    status: 'UNKNOWN', lastChecked: 0 },
-      'grafana':        { id: 'grafana',         status: 'UNKNOWN', lastChecked: 0 },
-    },
-    heapMB: null,
-    alerts: [],
-    lastPoll: 0,
-  });
+  const [heapMB, setHeapMB] = useState<number | null>(null);
+  const [alerts, setAlerts] = useState<AlertEntry[]>([]);
+  const [lastPoll, setLastPoll] = useState<number>(0);
 
   // Track resolved alerts: once an alert from AlertManager disappears, we show it as RESOLVED for a while
   const prevAlertIds = useRef<Set<string>>(new Set());
@@ -214,12 +285,7 @@ function useCommandRoom() {
   const poll = useCallback(async () => {
     const now = Date.now();
 
-    const [labRat, sentinelAgent, prometheus, alertmanager, grafana, heapMB, freshAlerts] = await Promise.all([
-      checkLabRat(),
-      checkSentinelAgent(),
-      checkNoCors('http://localhost:9090/-/healthy'),
-      checkNoCors('http://localhost:9093/-/healthy'),
-      checkNoCors('http://localhost:3000/api/health'),
+    const [freshHeap, freshAlerts] = await Promise.all([
       fetchHeapMB(),
       fetchAlerts(),
     ]);
@@ -228,7 +294,6 @@ function useCommandRoom() {
     const freshIds = new Set(freshAlerts.map((a) => a.id));
     prevAlertIds.current.forEach((oldId) => {
       if (!freshIds.has(oldId)) {
-        // This alert disappeared — mark resolved
         resolvedBuffer.current.push({
           id: `resolved-${oldId}-${now}`,
           alertname: oldId.split('-')[0],
@@ -249,18 +314,9 @@ function useCommandRoom() {
     // Trim resolved buffer — keep only last 10 seconds worth
     resolvedBuffer.current = resolvedBuffer.current.filter((r) => now - r.timestamp < 10_000);
 
-    setState({
-      services: {
-        'lab-rat':        { id: 'lab-rat',        status: labRat,        lastChecked: now },
-        'sentinel-agent': { id: 'sentinel-agent',  status: sentinelAgent, lastChecked: now },
-        'prometheus':     { id: 'prometheus',      status: prometheus,    lastChecked: now },
-        'alertmanager':   { id: 'alertmanager',    status: alertmanager,  lastChecked: now },
-        'grafana':        { id: 'grafana',         status: grafana,       lastChecked: now },
-      },
-      heapMB,
-      alerts: combined,
-      lastPoll: now,
-    });
+    setHeapMB(freshHeap);
+    setAlerts(combined);
+    setLastPoll(now);
   }, []);
 
   useEffect(() => {
@@ -269,7 +325,7 @@ function useCommandRoom() {
     return () => clearInterval(interval);
   }, [poll]);
 
-  return state;
+  return { heapMB, alerts, lastPoll };
 }
 
 // ---------------------------------------------------------------------------
@@ -432,33 +488,30 @@ function axialToPixel(q: number, r: number): { x: number; y: number } {
 }
 
 // Service axial coordinates
-const SERVICE_AXIAL: Record<ServiceId, [number, number]> = {
-  'grafana':        [-2,  0],
-  'prometheus':     [ 0,  0],
-  'alertmanager':   [ 2,  0],
-  'sentinel-agent': [ 0,  2],
-  'lab-rat':        [-2,  4],
+// Default initial positions for the well-known services. For services
+// discovered dynamically at runtime, positions are computed from
+// hexFlowerPositions(N) in App.tsx based on their order in the topology
+// response. Sentinel-agent always lands at center because it's the conceptual
+// hub of the topology — everything else is "things sentinel-agent watches".
+const DEFAULT_SERVICE_AXIAL: Record<string, [number, number]> = {
+  'sentinel-agent': [0, 0],
+  'lab-rat':        [0, 2],
 };
 
-// Pixel centers computed once at module level (used as initial positions)
-const SERVICE_CENTERS: Record<ServiceId, { x: number; y: number }> = Object.fromEntries(
-  (Object.entries(SERVICE_AXIAL) as [ServiceId, [number, number]][]).map(
-    ([id, [q, r]]) => [id, axialToPixel(q, r)]
-  )
-) as Record<ServiceId, { x: number; y: number }>;
-
-// Suppress unused variable warning — exported for external use if needed
-void SERVICE_CENTERS;
+// SERVICE_CENTERS previously precomputed pixel centers at module level. That
+// only worked when the service list was a fixed compile-time constant; with
+// topology-driven services, centers are derived inside HexMap from whatever
+// the current axial positions are.
 
 // ---------------------------------------------------------------------------
 // Connection topology
 // ---------------------------------------------------------------------------
 
+// Only one logical connection remains after infra moved to the status strip:
+// the sentinel-agent watches lab-rat. Observability flow (lab-rat → Prometheus
+// → AlertManager → sentinel-agent → Grafana) is no longer drawn as inter-hex
+// connections because Prom/AM/Grafana aren't hexes anymore.
 const CONNECTIONS: [ServiceId, ServiceId][] = [
-  ['grafana',        'prometheus'],
-  ['prometheus',     'alertmanager'],
-  ['prometheus',     'sentinel-agent'],
-  ['alertmanager',   'sentinel-agent'],
   ['sentinel-agent', 'lab-rat'],
 ];
 
@@ -548,8 +601,16 @@ function assignConnectionPorts(
   centers: Record<ServiceId, { x: number; y: number }>
 ): Map<string, PortAssignment> {
 
+  // Filter out connections whose endpoints aren't both present in the
+  // centers map. This happens transiently when topology hasn't loaded yet,
+  // when Prometheus stops scraping one of the services, or when the user's
+  // deployment legitimately doesn't include a given service. Without this
+  // filter, sorting tries to index centers[<missing>].x and crashes the
+  // whole map.
+  const renderable = connections.filter(([a, b]) => centers[a] && centers[b]);
+
   // Sort shortest connections first — they get first pick of ideal edge
-  const sorted = [...connections].sort(([a1, b1], [a2, b2]) => {
+  const sorted = [...renderable].sort(([a1, b1], [a2, b2]) => {
     const l1 = Math.hypot(centers[b1].x - centers[a1].x, centers[b1].y - centers[a1].y);
     const l2 = Math.hypot(centers[b2].x - centers[a2].x, centers[b2].y - centers[a2].y);
     return l1 - l2;
@@ -785,9 +846,26 @@ interface HexMapProps {
   services: Record<ServiceId, ServiceState>;
   alerts: AlertEntry[];
   activeInvestigationCount: number;
+  heapMB: number | null;
 }
 
-function HexMap({ services, alerts, activeInvestigationCount }: HexMapProps) {
+/**
+ * Returns a short inline metric label for a given service hex, or null if the
+ * service has no special live metric and the default {@code :port} label
+ * should be used instead. Keeps the visual style identical across hexes —
+ * just a short monospace string under the service name.
+ */
+function liveMetricFor(id: string, heapMB: number | null, activeInvestigationCount: number): string | null {
+  if (id === 'lab-rat') {
+    return heapMB == null ? null : `HEAP ${heapMB.toFixed(0)}MB`;
+  }
+  if (id === 'sentinel-agent') {
+    return `${activeInvestigationCount} ACTIVE`;
+  }
+  return null;
+}
+
+function HexMap({ services, alerts, activeInvestigationCount, heapMB }: HexMapProps) {
   const [transform, setTransform] = useState({ x: 0, y: 0, scale: 1 });
   const [isDragging, setIsDragging] = useState(false);
   const dragging = useRef(false);
@@ -795,10 +873,29 @@ function HexMap({ services, alerts, activeInvestigationCount }: HexMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
 
-  // Draggable hex block state
-  const [hexPositions, setHexPositions] = useState<Record<ServiceId, [number, number]>>(
-    () => ({ ...SERVICE_AXIAL })
-  );
+  // Derive per-service styling and default positions from the current
+  // services list. Known services (lab-rat, sentinel-agent) get their
+  // curated config; anything else cycles through DEFAULT_PALETTE in
+  // discovery order and gets a position from the hex-flower generator.
+  const serviceIds = Object.keys(services);
+  const serviceConfigs = useMemo<Record<string, ServiceVisualConfig>>(() => {
+    const out: Record<string, ServiceVisualConfig> = {};
+    serviceIds.forEach((id, i) => { out[id] = configForService(id, i); });
+    return out;
+  }, [serviceIds.join('|')]);  // re-derive only when set of ids changes
+  const defaultPositions = useMemo<Record<string, [number, number]>>(() => {
+    const flowerSlots = hexFlowerPositions(serviceIds.length);
+    const out: Record<string, [number, number]> = {};
+    serviceIds.forEach((id, i) => {
+      out[id] = DEFAULT_SERVICE_AXIAL[id] ?? flowerSlots[i] ?? [0, 0];
+    });
+    return out;
+  }, [serviceIds.join('|')]);
+
+  // Draggable hex block state — initial value tracks defaultPositions but
+  // user drags persist until the service list changes.
+  const [hexPositions, setHexPositions] = useState<Record<ServiceId, [number, number]>>(defaultPositions);
+  useEffect(() => { setHexPositions(defaultPositions); }, [defaultPositions]);
   const [draggingBlock, setDraggingBlock] = useState<{ id: ServiceId; x: number; y: number } | null>(null);
 
   // Issue 5 — hovered hex state
@@ -842,11 +939,17 @@ function HexMap({ services, alerts, activeInvestigationCount }: HexMapProps) {
     return false;
   };
 
-  // Compute live pixel centers from hexPositions state
+  // Compute live pixel centers. Iterates the *current services list* (not
+  // hexPositions keys) and falls back to defaultPositions for any service
+  // whose drag state hasn't initialized yet. Without this fallback, a fresh
+  // topology poll arrives → services list updates immediately → hexPositions
+  // state updates one render later (via useEffect) → render in between sees
+  // a service whose hexPositions entry is undefined → destructuring [q, r]
+  // crashes the whole map.
   const liveCenters: Record<ServiceId, { x: number; y: number }> = Object.fromEntries(
-    (Object.keys(hexPositions) as ServiceId[]).map(id => {
-      const [q, r] = hexPositions[id];
-      return [id, axialToPixel(q, r)];
+    serviceIds.map(id => {
+      const pos = hexPositions[id] ?? defaultPositions[id] ?? [0, 0];
+      return [id, axialToPixel(pos[0], pos[1])];
     })
   ) as Record<ServiceId, { x: number; y: number }>;
 
@@ -855,7 +958,7 @@ function HexMap({ services, alerts, activeInvestigationCount }: HexMapProps) {
   // ---------------------------------------------------------------------------
 
   const getHexStyle = (id: ServiceId, isHovered: boolean, isDraggingThis: boolean): HexStyle => {
-    const cfg = SERVICE_CONFIG[id];
+    const cfg = serviceConfigs[id];
     const status = services[id].status;
     const hasAlert = serviceHasAlert(id);
 
@@ -975,14 +1078,24 @@ function HexMap({ services, alerts, activeInvestigationCount }: HexMapProps) {
     if (alert) {
       return { flowColor: '#d29922', dimColor: '#d29922', hasAlert: true };
     }
-    return { flowColor: SERVICE_CONFIG[a].accent, dimColor: SERVICE_CONFIG[a].accent, hasAlert: false };
+    return { flowColor: serviceConfigs[a]?.accent ?? '#3b82f6', dimColor: serviceConfigs[a]?.accent ?? '#3b82f6', hasAlert: false };
   };
 
   // ---------------------------------------------------------------------------
   // Render connection geometry — obstacle-aware paths for all connections
   // ---------------------------------------------------------------------------
 
-  const portMap = assignConnectionPorts(CONNECTIONS, liveCenters);
+  // Only draw connections whose endpoints actually exist in the current
+  // topology. If Prometheus stops scraping lab-rat (or vice versa) the
+  // CONNECTIONS list still references it, but liveCenters / services won't
+  // have it — every downstream lookup would crash. Filtering once here
+  // means renderConnection / getFlowColor can safely assume both endpoints
+  // are real.
+  const renderableConnections = CONNECTIONS.filter(([a, b]) =>
+    liveCenters[a] && liveCenters[b] && services[a] && services[b]
+  );
+
+  const portMap = assignConnectionPorts(renderableConnections, liveCenters);
 
   const renderConnection = (a: ServiceId, b: ServiceId) => {
     const port = portMap.get(`${a}-${b}`);
@@ -1006,7 +1119,7 @@ function HexMap({ services, alerts, activeInvestigationCount }: HexMapProps) {
     };
   };
 
-  const connectionData = CONNECTIONS.map(([a, b]) => renderConnection(a, b)).filter(Boolean);
+  const connectionData = renderableConnections.map(([a, b]) => renderConnection(a, b)).filter(Boolean);
 
   return (
     <div className="svg-container" ref={containerRef}>
@@ -1082,10 +1195,10 @@ function HexMap({ services, alerts, activeInvestigationCount }: HexMapProps) {
             </feMerge>
           </filter>
           {/* Arrowhead markers — one per service accent color */}
-          {(Object.keys(SERVICE_CONFIG) as ServiceId[]).map(id => (
+          {serviceIds.map(id => (
             <marker key={id} id={`arrow-${id}`} markerWidth="6" markerHeight="4"
               refX="6" refY="2" orient="auto">
-              <polygon points="0,0 6,2 0,4" fill={SERVICE_CONFIG[id].accent} />
+              <polygon points="0,0 6,2 0,4" fill={serviceConfigs[id]?.accent ?? '#3b82f6'} />
             </marker>
           ))}
           <marker id="arrow-alert" markerWidth="6" markerHeight="4" refX="6" refY="2" orient="auto">
@@ -1157,7 +1270,7 @@ function HexMap({ services, alerts, activeInvestigationCount }: HexMapProps) {
 
           {/* ── Layer 4: Hex FILLS only (polygon fill, no stroke) ── */}
           <g>
-            {(Object.keys(SERVICE_AXIAL) as ServiceId[]).map((id) => {
+            {(serviceIds as ServiceId[]).map((id) => {
               const isDraggingThis = draggingBlock?.id === id;
               // Skip the dragged hex here — it renders in the overlay at the end
               if (isDraggingThis) return null;
@@ -1182,7 +1295,7 @@ function HexMap({ services, alerts, activeInvestigationCount }: HexMapProps) {
 
           {/* ── Layer 5: Hex STROKES only (fill:none, stroke only) ── */}
           <g>
-            {(Object.keys(SERVICE_AXIAL) as ServiceId[]).map((id) => {
+            {(serviceIds as ServiceId[]).map((id) => {
               const isDraggingThis = draggingBlock?.id === id;
               if (isDraggingThis) return null;
               const isHovered = hoveredHex === id;
@@ -1245,8 +1358,8 @@ function HexMap({ services, alerts, activeInvestigationCount }: HexMapProps) {
             but the label text stays crisp above everything.
           */}
           <g>
-            {(Object.keys(SERVICE_AXIAL) as ServiceId[]).map((id) => {
-              const cfg = SERVICE_CONFIG[id];
+            {(serviceIds as ServiceId[]).map((id) => {
+              const cfg = serviceConfigs[id];
               const isDraggingThis = draggingBlock?.id === id;
               if (isDraggingThis) return null;
               const isHovered = hoveredHex === id;
@@ -1322,8 +1435,13 @@ function HexMap({ services, alerts, activeInvestigationCount }: HexMapProps) {
             })}
           </g>
 
-          {/* ── Investigating badge on sentinel-agent hex ── */}
-          {activeInvestigationCount > 0 && (() => {
+          {/* ── Investigating badge on sentinel-agent hex ──
+              Only renders when sentinel-agent is actually one of the
+              discovered services — without this guard, a topology that
+              doesn't include 'sentinel-agent' (e.g. agent rebooting,
+              Prometheus hasn't re-scraped yet) crashes accessing .x on
+              undefined. */}
+          {activeInvestigationCount > 0 && liveCenters['sentinel-agent'] && (() => {
             const sentinelCenter = liveCenters['sentinel-agent'];
             const isDraggingThis = draggingBlock?.id === 'sentinel-agent';
             if (isDraggingThis) return null;
@@ -1365,7 +1483,7 @@ function HexMap({ services, alerts, activeInvestigationCount }: HexMapProps) {
           {/* ── Drag ghost overlay — dragged hex renders last (topmost) ── */}
           {draggingBlock && (() => {
             const id = draggingBlock.id;
-            const cfg = SERVICE_CONFIG[id];
+            const cfg = serviceConfigs[id];
             const style = getHexStyle(id, false, true);
             const status = services[id].status;
             const { x: gx, y: gy } = { x: draggingBlock.x, y: draggingBlock.y - 6 };
@@ -1428,7 +1546,7 @@ function HexMap({ services, alerts, activeInvestigationCount }: HexMapProps) {
                   fill="#7d8590"
                   style={{ pointerEvents: 'none' }}
                 >
-                  :{cfg.port}
+                  {liveMetricFor(id, heapMB, activeInvestigationCount) ?? (cfg.port > 0 ? `:${cfg.port}` : '')}
                 </text>
                 <circle
                   cx={gx}
@@ -2107,13 +2225,116 @@ function CommandSidebar({ alerts, investigations, activeCount, sseConnected }: C
 // App — main layout
 // ---------------------------------------------------------------------------
 
+// InfraStrip — compact status row showing the observability stack's health.
+// Phase 3 split: app services (lab-rat, sentinel-agent, …) render as hex
+// cells because they're the things being watched; infrastructure (Prom, AM,
+// Grafana) renders here as a horizontal pill bar because it's the same in
+// every deployment and doesn't need the visual real-estate of a hex.
+function InfraStrip({ items }: { items: TopologyInfraNode[] }) {
+  if (!items.length) return null;
+  const mono = "'JetBrains Mono', 'Courier New', monospace";
+  return (
+    <div style={{
+      display: 'flex',
+      gap: '12px',
+      alignItems: 'center',
+      padding: '6px 14px',
+      background: 'rgba(13, 21, 32, 0.65)',
+      borderBottom: '1px solid #1e2d3d',
+      fontFamily: mono,
+      fontSize: '10px',
+      letterSpacing: '0.08em',
+    }}>
+      <span style={{ color: '#6b7280', fontWeight: 600 }}>INFRA</span>
+      {items.map(item => {
+        const color = item.healthy ? '#22c55e' : '#ef4444';
+        // Map "internal" docker URLs (used by the agent) to the host-visible
+        // form when the dashboard links out — the operator's browser can't
+        // reach prometheus:9090 but it CAN reach localhost:9090.
+        const browserUrl = item.url
+          .replace('://prometheus:', '://localhost:')
+          .replace('://alertmanager:', '://localhost:')
+          .replace('://grafana:', '://localhost:');
+        return (
+          <a
+            key={item.name}
+            href={browserUrl}
+            target="_blank"
+            rel="noreferrer"
+            title={item.url}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '5px',
+              padding: '2px 8px',
+              borderRadius: '3px',
+              border: `1px solid ${color}44`,
+              background: `${color}10`,
+              color: color,
+              textDecoration: 'none',
+            }}
+          >
+            <span style={{
+              width: '6px', height: '6px', borderRadius: '50%',
+              background: color, display: 'inline-block',
+            }} />
+            <span style={{ color: '#e6edf3' }}>{item.name.toUpperCase()}</span>
+            <span style={{ color: '#6b7280' }}>·</span>
+            <span>{item.healthy ? 'OK' : 'DOWN'}</span>
+          </a>
+        );
+      })}
+    </div>
+  );
+}
+
+// useTopology — polls the agent's /api/topology every 5s. Returns the latest
+// snapshot of "what does Sentinel see in this deployment?" The hook is
+// deliberately separate from useCommandRoom so the existing direct-probe
+// polling continues to work during the transition; once the hex map is fully
+// topology-driven, useCommandRoom can be retired.
+function useTopology() {
+  const [topology, setTopology] = useState<ApiTopology | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      const t = await fetchTopology();
+      if (!cancelled && t) setTopology(t);
+    };
+    poll();
+    const id = setInterval(poll, 5000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+  return topology;
+}
+
 export default function App() {
-  const { services, heapMB, alerts, lastPoll } = useCommandRoom();
+  const { heapMB, alerts, lastPoll } = useCommandRoom();
   const { investigations, activeInvestigationCount, sseConnected } = useInvestigations();
+  const topology = useTopology();
+
+  // Services Record is derived from the topology API now — no hardcoded list,
+  // no direct browser probes. Whatever Prometheus is scraping shows up as a
+  // hex; whatever it stops scraping disappears. While the first /api/topology
+  // poll is in flight, we render an empty services map so the hex grid simply
+  // says nothing rather than flashing dead hexes.
+  const services: Record<ServiceId, ServiceState> = useMemo(() => {
+    if (!topology) return {};
+    const out: Record<ServiceId, ServiceState> = {};
+    const now = Date.now();
+    for (const svc of topology.services) {
+      out[svc.name] = {
+        id: svc.name,
+        status: svc.healthy ? 'UP' : 'DOWN',
+        lastChecked: now,
+      };
+    }
+    return out;
+  }, [topology]);
 
   const upCount = Object.values(services).filter(s => s.status === 'UP').length;
   const totalCount = Object.values(services).length;
-  const systemHealthy = upCount === totalCount;
+  const systemHealthy = totalCount > 0 && upCount === totalCount;
 
   const hc = heapColor(heapMB);
 
@@ -2142,9 +2363,14 @@ export default function App() {
         </div>
       </header>
 
+      {/* Infrastructure status row — Prometheus / AlertManager / Grafana
+          health, surfaced as pills so they don't occupy hex real-estate.
+          Driven by the agent's /api/topology, not by direct browser probes. */}
+      <InfraStrip items={topology?.infrastructure ?? []} />
+
       {/* Main content: SVG map + alert panel + investigation sidebar */}
       <div className="main-layout">
-        <HexMap services={services} alerts={alerts} activeInvestigationCount={activeInvestigationCount} />
+        <HexMap services={services} alerts={alerts} activeInvestigationCount={activeInvestigationCount} heapMB={heapMB} />
         <CommandSidebar
           alerts={alerts}
           investigations={investigations}
@@ -2155,8 +2381,8 @@ export default function App() {
 
       {/* Bottom status bar */}
       <footer className="status-bar">
-        {Object.entries(services).map(([id, svc]) => {
-          const cfg = SERVICE_CONFIG[id as ServiceId];
+        {Object.entries(services).map(([id, svc], index) => {
+          const cfg = configForService(id, index);
           const isUp = svc.status === 'UP';
           const isLabRat = id === 'lab-rat';
           return (
