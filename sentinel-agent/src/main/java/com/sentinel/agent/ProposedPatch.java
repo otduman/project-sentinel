@@ -40,6 +40,15 @@ public class ProposedPatch {
     @Column(nullable = false, length = 512)
     private String filePath;
 
+    /**
+     * Which patchable service this patch targets — populated from the
+     * {@code PatchPathValidator.Resolved.serviceName} returned at proposeFix
+     * time. Nullable for backwards compatibility with pre-multi-service rows
+     * (which were all lab-rat by definition).
+     */
+    @Column(length = 64)
+    private String serviceName;
+
     @Column(columnDefinition = "TEXT")
     private String oldContent;
 
@@ -61,10 +70,11 @@ public class ProposedPatch {
 
     public ProposedPatch() { }
 
-    private ProposedPatch(UUID investigationId, String filePath,
+    private ProposedPatch(UUID investigationId, String filePath, String serviceName,
                           String oldContent, String newContent, String rationale) {
         this.investigationId = investigationId;
         this.filePath = filePath;
+        this.serviceName = serviceName;
         this.oldContent = oldContent;
         this.newContent = newContent;
         this.rationale = rationale;
@@ -74,15 +84,27 @@ public class ProposedPatch {
 
     /**
      * Factory — the only legal way to construct a fresh PENDING_REVIEW patch.
+     * {@code serviceName} may be null on legacy paths (lab-rat is assumed).
+     */
+    public static ProposedPatch create(UUID investigationId, String filePath, String serviceName,
+                                       String oldContent, String newContent, String rationale) {
+        return new ProposedPatch(investigationId, filePath, serviceName, oldContent, newContent, rationale);
+    }
+
+    /**
+     * Legacy 5-arg factory — kept so existing tests don't break.
+     * Equivalent to passing {@code serviceName = null}; the applier will
+     * still re-resolve via {@code PatchPathValidator} at apply time.
      */
     public static ProposedPatch create(UUID investigationId, String filePath,
                                        String oldContent, String newContent, String rationale) {
-        return new ProposedPatch(investigationId, filePath, oldContent, newContent, rationale);
+        return new ProposedPatch(investigationId, filePath, null, oldContent, newContent, rationale);
     }
 
     public UUID getId() { return id; }
     public UUID getInvestigationId() { return investigationId; }
     public String getFilePath() { return filePath; }
+    public String getServiceName() { return serviceName; }
     public String getOldContent() { return oldContent; }
     public String getNewContent() { return newContent; }
     public String getStatus() { return status; }

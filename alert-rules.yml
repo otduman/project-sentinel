@@ -71,3 +71,102 @@ groups:
             Prometheus has been unable to scrape {{ $labels.instance }}
             for over 10 seconds. Verify the Spring Boot process is
             running and that /actuator/prometheus is accessible.
+
+  # ---------------------------------------------------------------------------
+  # order-service rules — DB-flavoured failure modes. Each alert name encodes
+  # the service so the dashboard's SERVICE_ALERT_KEYWORDS_MAP can route
+  # firing alerts to the right hex cell, and so the agent's runbook lookup
+  # can find a service-specific playbook.
+  # ---------------------------------------------------------------------------
+  - name: order-service.rules
+    rules:
+
+      - alert: OrderServiceSlowQuery
+        expr: >
+          rate(http_server_requests_seconds_sum{job="order-service"}[1m])
+          /
+          rate(http_server_requests_seconds_count{job="order-service"}[1m])
+          > 2
+        for: 15s
+        labels:
+          severity: warning
+          service: order-service
+        annotations:
+          summary: "order-service mean response time exceeds 2 seconds"
+          description: >
+            Mean HTTP latency on order-service has been above 2 s for over
+            15 seconds. Likely cause: slow downstream query — check
+            /chaos/slow-query in the runbook.
+
+      - alert: OrderServiceThreadLeak
+        expr: jvm_threads_live_threads{job="order-service"} > 50
+        for: 30s
+        labels:
+          severity: warning
+          service: order-service
+        annotations:
+          summary: "order-service has too many live threads"
+          description: >
+            jvm_threads_live_threads on order-service has exceeded 50 for
+            over 30 seconds. Likely a parked-thread leak — see runbook.
+
+      - alert: OrderServiceDown
+        expr: up{job="order-service"} == 0
+        for: 10s
+        labels:
+          severity: critical
+          service: order-service
+        annotations:
+          summary: "order-service is unreachable"
+          description: >
+            Prometheus has been unable to scrape order-service for over
+            10 seconds. Verify the Spring Boot process is running.
+
+  # ---------------------------------------------------------------------------
+  # payment-service rules — outbound-dependency flavour failures: timeouts on
+  # the downstream PSP, retry-storm memory pressure, and 5xx spikes.
+  # ---------------------------------------------------------------------------
+  - name: payment-service.rules
+    rules:
+
+      - alert: PaymentServiceErrorRate
+        expr: >
+          sum(rate(http_server_requests_seconds_count{job="payment-service", status=~"5.."}[1m]))
+          /
+          clamp_min(sum(rate(http_server_requests_seconds_count{job="payment-service"}[1m])), 0.001)
+          > 0.1
+        for: 20s
+        labels:
+          severity: warning
+          service: payment-service
+        annotations:
+          summary: "payment-service 5xx rate above 10%"
+          description: >
+            More than 10% of payment-service responses have been 5xx for
+            over 20 seconds. Likely cause: downstream PSP failures — see
+            /chaos/error-rate runbook.
+
+      - alert: PaymentServiceHighHeap
+        expr: jvm_memory_used_bytes{area="heap", job="payment-service"} > 104857600
+        for: 20s
+        labels:
+          severity: warning
+          service: payment-service
+        annotations:
+          summary: "payment-service heap above 100 MB"
+          description: >
+            JVM heap on payment-service has exceeded 100 MB for over
+            20 seconds. Likely cause: retry-buffer accumulation — see
+            /chaos/memory-pressure runbook.
+
+      - alert: PaymentServiceDown
+        expr: up{job="payment-service"} == 0
+        for: 10s
+        labels:
+          severity: critical
+          service: payment-service
+        annotations:
+          summary: "payment-service is unreachable"
+          description: >
+            Prometheus has been unable to scrape payment-service for over
+            10 seconds. Verify the Spring Boot process is running.

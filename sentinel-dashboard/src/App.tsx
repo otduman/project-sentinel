@@ -86,8 +86,10 @@ interface ServiceVisualConfig {
 // Curated styling for the well-known services. Any service NOT in this map
 // gets a default style cycled from DEFAULT_PALETTE by its discovery index.
 const KNOWN_SERVICES: Record<string, ServiceVisualConfig> = {
-  'lab-rat':        { label: 'LAB-RAT',  port: 8080, color: '#22c55e', fill: '#0d1f14', borderBase: '#1a3d24', accent: '#22c55e' },
-  'sentinel-agent': { label: 'SENTINEL', port: 8081, color: '#3b82f6', fill: '#0d1520', borderBase: '#1a2e4a', accent: '#3b82f6' },
+  'lab-rat':         { label: 'LAB-RAT',   port: 8080, color: '#22c55e', fill: '#0d1f14', borderBase: '#1a3d24', accent: '#22c55e' },
+  'sentinel-agent':  { label: 'SENTINEL',  port: 8081, color: '#3b82f6', fill: '#0d1520', borderBase: '#1a2e4a', accent: '#3b82f6' },
+  'order-service':   { label: 'ORDERS',    port: 8082, color: '#f97316', fill: '#1f1508', borderBase: '#3d2510', accent: '#f97316' },
+  'payment-service': { label: 'PAYMENTS',  port: 8083, color: '#a855f7', fill: '#160d1f', borderBase: '#2e1a3d', accent: '#a855f7' },
 };
 
 // Fallback palette for services discovered at runtime that don't match a
@@ -493,9 +495,15 @@ function axialToPixel(q: number, r: number): { x: number; y: number } {
 // hexFlowerPositions(N) in App.tsx based on their order in the topology
 // response. Sentinel-agent always lands at center because it's the conceptual
 // hub of the topology — everything else is "things sentinel-agent watches".
+// Sentinel-agent is the conceptual hub of the topology and lives at the
+// origin. Target services radiate outward from it: lab-rat below (south),
+// order-service east, payment-service west. Anything else Prometheus
+// discovers slots into the next hexFlowerPositions(N) free position.
 const DEFAULT_SERVICE_AXIAL: Record<string, [number, number]> = {
-  'sentinel-agent': [0, 0],
-  'lab-rat':        [0, 2],
+  'sentinel-agent':  [ 0,  0],
+  'lab-rat':         [ 0,  2],
+  'order-service':   [ 2,  0],
+  'payment-service': [-2,  2],
 };
 
 // SERVICE_CENTERS previously precomputed pixel centers at module level. That
@@ -507,13 +515,17 @@ const DEFAULT_SERVICE_AXIAL: Record<string, [number, number]> = {
 // Connection topology
 // ---------------------------------------------------------------------------
 
-// Only one logical connection remains after infra moved to the status strip:
-// the sentinel-agent watches lab-rat. Observability flow (lab-rat → Prometheus
-// → AlertManager → sentinel-agent → Grafana) is no longer drawn as inter-hex
-// connections because Prom/AM/Grafana aren't hexes anymore.
-const CONNECTIONS: [ServiceId, ServiceId][] = [
-  ['sentinel-agent', 'lab-rat'],
-];
+// Star topology: sentinel-agent is the hub, every other discovered service is
+// a spoke. Derived from the live service list so adding a Prometheus scrape job
+// (order-service, payment-service, ...) automatically gets an arrow without an
+// App.tsx edit. Observability infra (Prom/AM/Grafana) lives in the status strip,
+// not on the hex grid, so they're excluded here.
+const SENTINEL_HUB: ServiceId = 'sentinel-agent';
+function deriveConnections(serviceIds: ServiceId[]): [ServiceId, ServiceId][] {
+  return serviceIds
+    .filter((id) => id !== SENTINEL_HUB)
+    .map((id) => [SENTINEL_HUB, id] as [ServiceId, ServiceId]);
+}
 
 // ---------------------------------------------------------------------------
 // Connection geometry — obstacle-aware path computation
@@ -845,8 +857,13 @@ interface HexStyle {
 // Module-level so both HexMap (hex border glow) and CommandSidebar (sidebar
 // filtering) use the same alert→service association.
 const SERVICE_ALERT_KEYWORDS_MAP: Record<string, string[]> = {
-  'lab-rat': ['lab', 'rat', 'heap', 'memory', 'cpu', 'jvm', 'thread', 'deadlock', 'gc'],
+  // 'lab-rat' historically caught the generic alert names (HighHeapUsage, AppDown,
+  // CpuLatencySpike, ThreadDeadlock, DiskFull, HighCpuUsage). Order/payment alerts
+  // are explicitly prefixed with their service name so the filter is unambiguous.
+  'lab-rat': ['highheap', 'highcpu', 'cpulatency', 'appdown', 'threaddeadlock', 'diskfull', 'heap', 'memory', 'jvm', 'gc'],
   'sentinel-agent': ['sentinel', 'agent'],
+  'order-service':   ['order'],
+  'payment-service': ['payment'],
 };
 
 export function alertBelongsToService(alertname: string, serviceId: string): boolean {
@@ -1096,15 +1113,12 @@ function HexMap({ services, alerts, activeInvestigationCount, heapMB, selectedFi
   // Render connection geometry — obstacle-aware paths for all connections
   // ---------------------------------------------------------------------------
 
-  // Only draw connections whose endpoints actually exist in the current
-  // topology. If Prometheus stops scraping lab-rat (or vice versa) the
-  // CONNECTIONS list still references it, but liveCenters / services won't
-  // have it — every downstream lookup would crash. Filtering once here
-  // means renderConnection / getFlowColor can safely assume both endpoints
-  // are real.
-  const renderableConnections = CONNECTIONS.filter(([a, b]) =>
-    liveCenters[a] && liveCenters[b] && services[a] && services[b]
-  );
+  // Derive connections from the live service list (star topology, sentinel-agent
+  // hub). Only keep edges whose endpoints actually have rendered hexes — if
+  // Prometheus stops scraping a target, the service drops out of liveCenters
+  // and we silently omit its arrow rather than crash downstream lookups.
+  const renderableConnections = deriveConnections(Object.keys(services) as ServiceId[])
+    .filter(([a, b]) => liveCenters[a] && liveCenters[b] && services[a] && services[b]);
 
   const portMap = assignConnectionPorts(renderableConnections, liveCenters);
 

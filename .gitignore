@@ -10,9 +10,12 @@
 .env.*.local
 
 # --- Phase 2 patch backups (written by PatchApplier into the bind-mounted
-#     lab-rat source tree). Never commit — these contain timestamped pre-images
-#     of patched files and the directory rewrites itself on every apply. ---
-lab-rat/src/.sentinel-backups/
+#     source tree of each patchable service). Never commit — these contain
+#     timestamped pre-images of patched files and the directory rewrites itself
+#     on every apply. The pattern matches lab-rat/, order-service/,
+#     payment-service/, and any future patchable service registered in
+#     PatchPathValidator.SERVICES. ---
+**/src/.sentinel-backups/
 
 # --- Gradle (root-level cache and build) ---
 .gradle/

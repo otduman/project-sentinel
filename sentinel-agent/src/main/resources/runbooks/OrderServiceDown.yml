@@ -1,0 +1,13 @@
+alertName: OrderServiceDown
+title: order-service is unreachable
+severity: critical
+description: >
+  Prometheus has been unable to scrape order-service for over 10 seconds.
+  Either the Spring Boot process is dead, the container is unhealthy, or
+  the network path between Prometheus and order-service is broken.
+steps:
+  - Verify the container is running (docker compose ps | grep order-service)
+  - If exited, check exit logs (docker compose logs order-service --tail 100) for OOM, port bind failures, or startup exceptions
+  - Confirm /actuator/health is reachable from inside the sentinel-net Docker network
+  - If recently deployed, look for misconfiguration (bad property override, wrong port, missing env var)
+  - Proposed fix is typically a config change in application.properties or a code revert to the last known-good build

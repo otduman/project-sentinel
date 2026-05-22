@@ -1,0 +1,12 @@
+alertName: PaymentServiceDown
+title: payment-service is unreachable
+severity: critical
+description: >
+  Prometheus cannot scrape payment-service for over 10 seconds — the
+  service is dead, container exited, or network path is broken. Same
+  troubleshooting steps as OrderServiceDown.
+steps:
+  - Verify container state (docker compose ps | grep payment-service)
+  - On exit, scrape recent logs for OOM, port bind failures, missing config
+  - Confirm /actuator/health is reachable from inside sentinel-net
+  - For OOM specifically: bump -Xmx temporarily and investigate retained-buffer accumulation (see PaymentServiceHighHeap runbook)

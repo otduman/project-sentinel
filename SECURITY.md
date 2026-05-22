@@ -39,9 +39,14 @@ This is a **demo / portfolio project**. It is hardened where the cost is low, bu
 
 | ID | Issue | Why deferred |
 |---|---|---|
-| **H-3** | `agent.webhook.secret` is optional — when blank, anyone reachable on port 8081 can send `status=resolved` to close active episodes (token-burn DoS) or fake firings (audit pollution + LLM cost) | Demo binds to localhost; impact is bounded. Production must set it. |
 | **L-1** | `GET /api/patches/by-investigation/{id}` and `/api/patches/stats` are unauthenticated. They return LLM-generated source code — fine in this repo (lab-rat is public), exposing in a real deployment would leak proposed fixes. | The dashboard reads them; switching to authenticated GET requires browser-side credential handling. |
-| **M-2** | Path validator is allowlist-by-shape (regex) rather than allowlist-by-name. A future legitimate class would need no code change to be patchable, but that's also the attack surface | Acceptable for a demo whose only patch target is one package. |
+| **M-2** | Path validator is allowlist-by-shape (regex) rather than allowlist-by-name. A future legitimate class would need no code change to be patchable, but that's also the attack surface | Acceptable for a demo where the patchable services are explicitly registered in `PatchPathValidator.SERVICES`. |
+
+## Resolved
+
+| ID | Issue | Resolution |
+|---|---|---|
+| **H-3** | `agent.webhook.secret` was optional — unauthenticated `resolved` webhooks allowed token-burn DoS | `AlertController.validateConfig` now fails fast at startup if the secret is blank; mirrors the same fail-closed pattern used by `agent.patch.secret` |
 
 ## Reporting a security issue
 

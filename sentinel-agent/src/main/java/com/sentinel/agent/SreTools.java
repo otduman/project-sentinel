@@ -139,15 +139,20 @@ public class SreTools {
         }
 
         // 2. Validate the path against the allowlist BEFORE persisting anything.
-        //    This is the single safety gate that keeps the agent from touching
-        //    files outside lab-rat — including its own source.
-        String canonicalPath;
+        //    The validator resolves WHICH service the path belongs to (lab-rat,
+        //    order-service, payment-service); we store that on the patch row
+        //    so the dashboard can show "PATCH for <service>" and so the
+        //    applier knows which bind-mount to write under.
+        PatchPathValidator.Resolved resolved;
         try {
-            canonicalPath = PatchPathValidator.normalise(filePath);
+            resolved = PatchPathValidator.resolve(filePath);
         } catch (IllegalArgumentException e) {
             return "REJECTED: " + e.getMessage()
-                    + ". Re-call proposeFix with a valid path inside com.sentinel.lab_rat.";
+                    + ". Re-call proposeFix with a valid path inside one of the patchable services ("
+                    + PatchPathValidator.SERVICES.keySet() + ").";
         }
+        String canonicalPath = resolved.canonicalPath();
+        String serviceName = resolved.serviceName();
 
         // 3. Size & shape sanity. 64KB per side is generous for a single
         //    class file. oldCode is REQUIRED — without it the applier cannot
@@ -169,15 +174,16 @@ public class SreTools {
 
         // 4. Persist as PENDING_REVIEW. Dashboard surfaces this; human approves/rejects.
         ProposedPatch patch = ProposedPatch.create(
-                investigationId, canonicalPath, oldCode, newCode, rationale);
+                investigationId, canonicalPath, serviceName, oldCode, newCode, rationale);
         ProposedPatch saved = proposedPatchRepository.save(patch);
 
         System.out.println("[Sentinel FixProposer] Patch " + saved.getId()
-                + " queued for review (file=" + canonicalPath
+                + " queued for review (service=" + serviceName
+                + ", file=" + canonicalPath
                 + ", investigation=" + investigationId + ")");
 
         return "SUCCESS. Patch " + saved.getId() + " queued for human approval. "
-                + "File: " + canonicalPath + ". Status: PENDING_REVIEW.";
+                + "Service: " + serviceName + ". File: " + canonicalPath + ". Status: PENDING_REVIEW.";
     }
 
     @Tool("Retrieves the operational runbook for the given alert name. Returns step-by-step diagnosis and resolution procedures written by the SRE team. ALWAYS call this first at the start of any investigation.")

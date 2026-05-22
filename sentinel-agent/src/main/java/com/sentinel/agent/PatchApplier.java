@@ -14,14 +14,11 @@ import java.time.Instant;
 import java.util.Objects;
 
 /**
- * Filesystem-side of the patch approval flow. Phase 2:
+ * Filesystem-side of the patch approval flow. Multi-service edition:
  * <ol>
- *   <li>{@link #apply(ProposedPatch)} writes a backup of the existing file to
- *       the configured backup directory, then atomically replaces the target
- *       with the LLM-proposed new content.</li>
- *   <li>Spring DevTools (configured on lab-rat) watches the source tree and
- *       hot-restarts the JVM when the file changes — so no Docker rebuild
- *       is needed for the patch to take effect.</li>
+ *   <li>{@link #apply(ProposedPatch)} validates + resolves which service the
+ *       patch belongs to, writes a backup under that service's source root,
+ *       then atomically replaces the target with the LLM-proposed new content.</li>
  *   <li>{@link #rollback(ProposedPatch)} restores the most recent backup for
  *       this patch's file. Used both on apply-failure and on the explicit
  *       rollback endpoint.</li>
@@ -29,30 +26,30 @@ import java.util.Objects;
  *
  * <h3>Defence in depth</h3>
  * <ul>
- *   <li>{@link PatchPathValidator#normalise} on the way in — rejects path
- *       traversal, non-Java files, paths outside lab-rat.</li>
- *   <li>{@link Path#toRealPath} before write — resolves symlinks; if the
- *       resolved path escapes the allowed root, the apply is rejected. This
- *       defends against a symlink planted under {@code com.sentinel.lab_rat}
- *       that would otherwise let the validator's prefix check be bypassed.</li>
- *   <li>Backup written before overwrite — every apply is reversible.</li>
- *   <li>Atomic move via {@link StandardCopyOption#ATOMIC_MOVE} — partial-write
- *       failure can't leave a corrupted source file.</li>
+ *   <li>{@link PatchPathValidator#resolve} on the way in — rejects path
+ *       traversal, non-Java files, paths outside the allowed service set.</li>
+ *   <li>{@link Path#toRealPath} before write — resolves symlinks; the resolved
+ *       path must still live under the matched service's package root.</li>
+ *   <li>Drift detection — refuses overwrite if the file on disk no longer
+ *       matches {@code patch.getOldContent()}.</li>
+ *   <li>Backup written before overwrite.</li>
+ *   <li>Atomic move via {@link StandardCopyOption#ATOMIC_MOVE} with a
+ *       non-atomic fallback for bind-mount filesystems that don't support it.</li>
  * </ul>
  */
 @Service
 public class PatchApplier {
 
     /**
-     * Where the lab-rat source tree is mounted inside the agent container.
-     * Defaults to the production value; overridden in tests via
-     * {@code ReflectionTestUtils} to point at a temp directory.
+     * Prefix that gets prepended to the validator's canonical paths. In
+     * production this is {@code ""} (paths are already absolute container
+     * paths like {@code /lab-rat-src/...}). In tests it's a {@code @TempDir},
+     * so the same canonical paths land under {@code <temp>/lab-rat-src/...}
+     * — letting the same code exercise every service without writing to
+     * real production-shaped paths on the dev machine.
      */
-    @Value("${agent.patch.src-root:" + PatchPathValidator.LAB_RAT_SRC_ROOT + "}")
-    private String srcRoot;
-
-    @Value("${agent.patch.backup-dir:/lab-rat-src/.sentinel-backups}")
-    private String backupDir;
+    @Value("${agent.patch.root-base:}")
+    private String rootBase;
 
     /** Result envelope so the controller can surface failure reasons in the response. */
     public record Result(boolean success, String message, String backupPath) {
@@ -65,59 +62,54 @@ public class PatchApplier {
     }
 
     /**
-     * Apply the patch. Writes a backup, then atomically replaces the target
-     * file with {@code patch.newContent}. Returns a {@link Result} — never
-     * throws to the caller. The Phase-1 path validator ran when the patch
-     * was first persisted; we re-validate here too because the patch row
-     * has been at rest in the DB for an unknown duration.
+     * Apply the patch. Resolves which service it targets, writes a backup
+     * under that service's root, then atomically replaces the file with
+     * {@code patch.newContent}. Returns a {@link Result} — never throws.
      */
     public Result apply(ProposedPatch patch) {
-        Path target;
+        PatchPathValidator.Resolved resolved;
         try {
-            // Re-validate: the path was checked at write time, but defense-in-depth
-            // means we don't trust DB content as a substitute for a fresh check.
-            // The validator anchors at LAB_RAT_SRC_ROOT; we re-anchor at srcRoot
-            // so tests can point at a temp directory without needing root privs.
-            target = resolveTargetPath(patch.getFilePath());
+            // Re-validate — the path was checked at proposeFix time, but
+            // defense-in-depth means we don't trust DB content as a substitute
+            // for a fresh check.
+            resolved = PatchPathValidator.resolve(patch.getFilePath());
         } catch (IllegalArgumentException e) {
             return Result.fail("Path validation failed: " + e.getMessage());
         }
 
-        // Symlink defense — toRealPath() resolves any symlinks and we re-check
-        // the prefix. Without this, a symlink under com/sentinel/lab_rat could
-        // point to anywhere on the filesystem and the prefix check would still
-        // pass (because the path string starts with the right prefix).
-        Path resolved;
+        PatchPathValidator.ServiceConfig svc = PatchPathValidator.SERVICES.get(resolved.serviceName());
+        if (svc == null) {
+            return Result.fail("Unknown service: " + resolved.serviceName());
+        }
+
+        Path target = absoluteTargetPath(resolved.canonicalPath());
+
+        // Symlink defence — toRealPath() resolves any symlinks; the resolved
+        // path must STILL live under this service's package root. Without
+        // this, a symlink planted under the service's package could escape
+        // the gate.
+        Path real;
         try {
-            // toRealPath fails if the file doesn't exist; that's fine for a
-            // fresh-add case but our patches always replace existing classes.
-            resolved = target.toRealPath();
+            real = target.toRealPath();
         } catch (NoSuchFileException e) {
             return Result.fail("Target file does not exist: " + target);
         } catch (IOException e) {
             return Result.fail("Could not resolve real path: " + e.getMessage());
         }
-        Path expectedRoot = Path.of(srcRoot, PatchPathValidator.LAB_RAT_PACKAGE_DIR)
+        Path expectedRoot = absoluteTargetPath(svc.srcRoot + "/" + svc.packageDir)
                 .toAbsolutePath().normalize();
-        if (!resolved.toAbsolutePath().normalize().startsWith(expectedRoot)) {
-            return Result.fail("Resolved path escapes lab-rat package: " + resolved);
+        if (!real.toAbsolutePath().normalize().startsWith(expectedRoot)) {
+            return Result.fail("Resolved path escapes " + resolved.serviceName() + " package: " + real);
         }
 
-        // Drift detection — refuse to overwrite if the file on disk doesn't
-        // still match what Gemini saw when it generated newContent. A null
-        // oldContent at this point is a contract violation (proposeFix is
-        // supposed to refuse blank oldCode); we treat it as a hard fail
-        // instead of skip-and-write because skipping would silently clobber
-        // any out-of-band edits made between proposal and approval.
-        // Line endings are normalised so a CRLF/LF difference (Windows IDE
-        // on a Linux container) doesn't trip a false positive.
+        // Drift detection — see class Javadoc.
         if (patch.getOldContent() == null || patch.getOldContent().isBlank()) {
             return Result.fail(
                     "Patch missing oldContent — refusing blind overwrite. "
                             + "Re-run the investigation so a fresh proposeFix call captures the current file.");
         }
         try {
-            String onDisk = Files.readString(resolved, StandardCharsets.UTF_8);
+            String onDisk = Files.readString(real, StandardCharsets.UTF_8);
             if (!Objects.equals(normaliseLineEndings(onDisk),
                     normaliseLineEndings(patch.getOldContent()))) {
                 return Result.fail(
@@ -133,30 +125,24 @@ public class PatchApplier {
         // don't collide.
         Path backupPath;
         try {
-            backupPath = backupTarget(resolved, patch.getId().toString());
+            backupPath = backupTarget(real, patch.getId().toString(), svc);
         } catch (IOException e) {
             return Result.fail("Backup failed (refusing to overwrite without backup): " + e.getMessage());
         }
 
-        // Atomic replace via temp file + ATOMIC_MOVE. Crash mid-write leaves
-        // either the original or the new file, never a partial. Some Docker
-        // bind-mount filesystems (notably gRPC FUSE on Docker Desktop for
-        // Windows) don't support ATOMIC_MOVE — we fall back to a non-atomic
-        // REPLACE_EXISTING in that case. The window for partial-write damage
-        // is bounded by the new content size and the backup is already on
-        // disk by this point, so rollback remains possible.
+        // Atomic replace via temp file + ATOMIC_MOVE with fallback to
+        // REPLACE_EXISTING for bind-mount filesystems that lack atomic move.
         try {
-            Path tmp = Files.createTempFile(resolved.getParent(), ".sentinel-patch-", ".java.tmp");
+            Path tmp = Files.createTempFile(real.getParent(), ".sentinel-patch-", ".java.tmp");
             Files.writeString(tmp, patch.getNewContent(), StandardCharsets.UTF_8);
             try {
-                Files.move(tmp, resolved, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                Files.move(tmp, real, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
             } catch (AtomicMoveNotSupportedException atomicNotSupported) {
-                Files.move(tmp, resolved, StandardCopyOption.REPLACE_EXISTING);
+                Files.move(tmp, real, StandardCopyOption.REPLACE_EXISTING);
             }
         } catch (IOException e) {
-            // Try to put the file back from the backup we just wrote.
             try {
-                Files.copy(backupPath, resolved, StandardCopyOption.REPLACE_EXISTING);
+                Files.copy(backupPath, real, StandardCopyOption.REPLACE_EXISTING);
             } catch (IOException restoreFail) {
                 return Result.fail("Write failed AND restore failed: " + e.getMessage()
                         + " / " + restoreFail.getMessage());
@@ -172,13 +158,18 @@ public class PatchApplier {
      * whatever the {@link #apply(ProposedPatch)} call wrote.
      */
     public Result rollback(ProposedPatch patch) {
-        Path target;
+        PatchPathValidator.Resolved resolved;
         try {
-            target = resolveTargetPath(patch.getFilePath());
+            resolved = PatchPathValidator.resolve(patch.getFilePath());
         } catch (IllegalArgumentException e) {
             return Result.fail("Path validation failed: " + e.getMessage());
         }
-        Path backupPath = mostRecentBackupFor(target.getFileName().toString(), patch.getId().toString());
+        PatchPathValidator.ServiceConfig svc = PatchPathValidator.SERVICES.get(resolved.serviceName());
+        if (svc == null) {
+            return Result.fail("Unknown service: " + resolved.serviceName());
+        }
+        Path target = absoluteTargetPath(resolved.canonicalPath());
+        Path backupPath = mostRecentBackupFor(target.getFileName().toString(), patch.getId().toString(), svc);
         if (backupPath == null) {
             return Result.fail("No backup found for patch " + patch.getId());
         }
@@ -192,10 +183,7 @@ public class PatchApplier {
 
     /**
      * Collapses CR/CRLF/LF to LF before comparing file contents. Required for
-     * the drift check: a file written with LF on a Linux container is read
-     * back as LF, but if a host-side editor inserted CRLFs, raw equality
-     * would falsely report drift. We don't care about line-ending style for
-     * the safety check — only the actual textual content.
+     * the drift check so a CRLF/LF style difference doesn't trip drift.
      */
     private static String normaliseLineEndings(String s) {
         if (s == null) return null;
@@ -203,31 +191,31 @@ public class PatchApplier {
     }
 
     /**
-     * Validates the LLM-supplied path via {@link PatchPathValidator}, then
-     * re-anchors it under the configured {@link #srcRoot}. The validator's
-     * canonical output is anchored at the production
-     * {@link PatchPathValidator#LAB_RAT_SRC_ROOT} constant; tests override
-     * {@code srcRoot} to a temp directory so we don't need to write to a
-     * production-shaped path on the test machine.
+     * Prepends the (optional) test root-base to the validator's canonical
+     * path. Production rootBase is "" so the canonical path is used as-is.
+     * Tests set rootBase to a temp directory.
      */
-    private Path resolveTargetPath(String rawPath) {
-        String canonical = PatchPathValidator.normalise(rawPath);
-        // Strip the well-known LAB_RAT_SRC_ROOT prefix and "/", leaving just
-        // the relative path under the source root (main/java/com/sentinel/lab_rat/Foo.java).
-        String relativeTail = canonical.substring(PatchPathValidator.LAB_RAT_SRC_ROOT.length() + 1);
-        return Path.of(srcRoot).resolve(relativeTail);
+    private Path absoluteTargetPath(String canonicalPath) {
+        if (rootBase == null || rootBase.isEmpty()) return Path.of(canonicalPath);
+        // canonicalPath always starts with "/" — strip it so resolve() works
+        // regardless of whether rootBase ends with a separator.
+        String tail = canonicalPath.startsWith("/") ? canonicalPath.substring(1) : canonicalPath;
+        return Path.of(rootBase).resolve(tail);
     }
 
-    // ------------------------------------------------------------------------
-    // Backup mechanics
-    // ------------------------------------------------------------------------
+    /** Where this service's backups live: {@code <srcRoot>/.sentinel-backups/}. */
+    private Path backupRootFor(PatchPathValidator.ServiceConfig svc) {
+        return absoluteTargetPath(svc.srcRoot + "/.sentinel-backups");
+    }
 
     /**
-     * Copies the target file into the backup dir under a name that encodes
-     * the patch id and timestamp. Pattern: {@code <fileName>.<patchId>.<epochMillis>.bak}.
+     * Copies the target file into the service's backup dir. Pattern:
+     * {@code <fileName>.<patchId>.<epochMillis>.bak}. Per-service backup
+     * directories mean a rollback for service A can't accidentally restore
+     * a file in service B.
      */
-    private Path backupTarget(Path target, String patchId) throws IOException {
-        Path backupRoot = Path.of(backupDir);
+    private Path backupTarget(Path target, String patchId, PatchPathValidator.ServiceConfig svc) throws IOException {
+        Path backupRoot = backupRootFor(svc);
         Files.createDirectories(backupRoot);
         String name = target.getFileName().toString()
                 + "." + patchId
@@ -239,11 +227,11 @@ public class PatchApplier {
     }
 
     /**
-     * Finds the most recent backup matching this patch id, used by rollback.
-     * Returns null if none exist.
+     * Finds the most recent backup matching this patch id under the given
+     * service's backup directory. Returns null if none exist.
      */
-    private Path mostRecentBackupFor(String fileName, String patchId) {
-        Path backupRoot = Path.of(backupDir);
+    private Path mostRecentBackupFor(String fileName, String patchId, PatchPathValidator.ServiceConfig svc) {
+        Path backupRoot = backupRootFor(svc);
         if (!Files.isDirectory(backupRoot)) return null;
         String prefix = fileName + "." + patchId + ".";
         try (var stream = Files.list(backupRoot)) {

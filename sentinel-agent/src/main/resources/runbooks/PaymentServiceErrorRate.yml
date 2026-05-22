@@ -1,0 +1,14 @@
+alertName: PaymentServiceErrorRate
+title: payment-service 5xx error rate above 10%
+severity: warning
+description: >
+  More than 10% of HTTP responses from payment-service have been 5xx
+  (typically 503) for over 20 seconds. The most common real-world cause
+  is a flaky downstream PSP (Stripe, Adyen, etc.) returning 5xx or
+  timing out. In the demo this is reproduced via /chaos/error-rate.
+steps:
+  - fetchLatestErrors will show "downstream failure" log lines if the chaos endpoint armed the failure mode
+  - Check the percentage of 5xx vs total requests via http_server_requests_seconds_count{status=~"5.."}
+  - In production: check the PSP's status page, your circuit breaker state, and retry queue depth
+  - Identify whether failures are uniform or specific to one merchant/region/currency
+  - Proposed fix typically involves opening a circuit breaker, adding retries with jittered backoff, or routing failed requests to a queue for later replay

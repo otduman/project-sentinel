@@ -97,4 +97,45 @@ class PatchPathValidatorTest {
         assertThat(PatchPathValidator.isValid("ChaosController.java")).isTrue();
         assertThat(PatchPathValidator.isValid("../etc/passwd")).isFalse();
     }
+
+    // ------------------------------------------------------------------
+    // Multi-service routing — locks in the per-service dispatch behaviour
+    // so adding/removing services in SERVICES doesn't silently mis-route.
+    // ------------------------------------------------------------------
+
+    @Test
+    void plainClassName_defaultsToLabRatForBackwardsCompat() {
+        PatchPathValidator.Resolved r = PatchPathValidator.resolve("ChaosController.java");
+        assertThat(r.serviceName()).isEqualTo("lab-rat");
+        assertThat(r.canonicalPath()).isEqualTo("/lab-rat-src/main/java/com/sentinel/lab_rat/ChaosController.java");
+    }
+
+    @Test
+    void orderServicePackagePath_routesToOrderService() {
+        PatchPathValidator.Resolved r = PatchPathValidator.resolve("com/sentinel/order_service/OrderController.java");
+        assertThat(r.serviceName()).isEqualTo("order-service");
+        assertThat(r.canonicalPath()).isEqualTo("/order-service-src/main/java/com/sentinel/order_service/OrderController.java");
+    }
+
+    @Test
+    void paymentServicePackagePath_routesToPaymentService() {
+        PatchPathValidator.Resolved r = PatchPathValidator.resolve("com/sentinel/payment_service/PaymentController.java");
+        assertThat(r.serviceName()).isEqualTo("payment-service");
+        assertThat(r.canonicalPath()).isEqualTo("/payment-service-src/main/java/com/sentinel/payment_service/PaymentController.java");
+    }
+
+    @Test
+    void orderServiceContainerAbsolutePath_isPreserved() {
+        PatchPathValidator.Resolved r = PatchPathValidator.resolve(
+                "/order-service-src/main/java/com/sentinel/order_service/OrderController.java");
+        assertThat(r.serviceName()).isEqualTo("order-service");
+        assertThat(r.canonicalPath()).isEqualTo("/order-service-src/main/java/com/sentinel/order_service/OrderController.java");
+    }
+
+    @Test
+    void paymentServiceRepoRelativePath_routesToPaymentService() {
+        PatchPathValidator.Resolved r = PatchPathValidator.resolve(
+                "payment-service/src/main/java/com/sentinel/payment_service/PaymentController.java");
+        assertThat(r.serviceName()).isEqualTo("payment-service");
+    }
 }

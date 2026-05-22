@@ -1,0 +1,14 @@
+alertName: OrderServiceSlowQuery
+title: order-service mean response time above 2 seconds
+severity: warning
+description: >
+  The mean HTTP latency for order-service has been above 2 s for at least
+  15 seconds. In a real orders service this typically means a slow database
+  query, a missing index, or a downstream call holding the request thread.
+  In this demo the symptom is reproduced by the /chaos/slow-query endpoint.
+steps:
+  - Call fetchLatestErrors to check whether the application log mentions the chaos endpoint
+  - Look for "simulating slow DB query" warnings in the order-service log — that confirms /chaos/slow-query was hit
+  - In production: profile the suspected slow handler, inspect EXPLAIN ANALYZE on the offending query, add or fix the missing index
+  - For the chaos demo: stop calling /chaos/slow-query; latency will return to baseline on next scrape
+  - Proposed fix should either add a request timeout, cache the slow result, or move the work to an async path

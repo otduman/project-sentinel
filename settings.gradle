@@ -3,7 +3,7 @@ rootProject.name = 'project-sentinel'
 // Conditional includes so per-module Dockerfiles can copy only the source
 // they need (e.g. lab-rat's Dockerfile doesn't copy sentinel-agent/). Local
 // dev always has all three present, so behaviour there is unchanged.
-['lab-rat', 'sentinel-core', 'sentinel-agent'].each { name ->
+['lab-rat', 'sentinel-core', 'sentinel-agent', 'order-service', 'payment-service'].each { name ->
     if (file(name).exists()) {
         include name
     }

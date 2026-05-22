@@ -1,0 +1,13 @@
+alertName: OrderServiceThreadLeak
+title: order-service live thread count is too high
+severity: warning
+description: >
+  jvm_threads_live_threads on order-service has exceeded 50 — far above
+  the baseline for an idle Spring Boot app. The usual cause is a code
+  path that spawns threads but never joins or shuts them down. In this
+  demo it's simulated by /chaos/stuck-thread.
+steps:
+  - Call fetchLatestErrors and look for "spawning a thread that will park" warnings — confirms /chaos/stuck-thread
+  - Run the profiler against order-service and inspect thread states; parked threads with names like "order-chaos-park-*" are the marker
+  - In production: every Thread.start() should have a corresponding executor lifecycle. Audit code for raw new Thread() usage
+  - The proposed fix should replace ad-hoc thread spawning with a bounded ExecutorService whose lifecycle is managed

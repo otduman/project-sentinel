@@ -37,17 +37,19 @@ class PatchApplierTest {
 
     @BeforeEach
     void setUp() throws IOException {
-        // Recreate the canonical container layout under the temp root, then
-        // point the applier's srcRoot at "<temp>/lab-rat-src" so writes land
-        // inside the sandbox instead of /lab-rat-src on the test machine.
-        Path srcRoot = tempRoot.resolve("lab-rat-src");
-        labRatPackageDir = srcRoot.resolve("main/java/com/sentinel/lab_rat");
+        // Multi-service applier rewrite — instead of a single srcRoot override,
+        // the test sets `rootBase` to its TempDir. The applier prepends
+        // rootBase to the validator's canonical path, so a canonical path of
+        // "/lab-rat-src/main/java/..." lands under "<temp>/lab-rat-src/...".
+        // The same scheme handles order-service and payment-service in tests
+        // by simply creating the matching subdirectory.
+        Path labRatSrc = tempRoot.resolve("lab-rat-src");
+        labRatPackageDir = labRatSrc.resolve("main/java/com/sentinel/lab_rat");
         Files.createDirectories(labRatPackageDir);
-        backupDir = srcRoot.resolve(".sentinel-backups");
+        backupDir = labRatSrc.resolve(".sentinel-backups");
 
         applier = new PatchApplier();
-        ReflectionTestUtils.setField(applier, "srcRoot", srcRoot.toString());
-        ReflectionTestUtils.setField(applier, "backupDir", backupDir.toString());
+        ReflectionTestUtils.setField(applier, "rootBase", tempRoot.toString());
     }
 
     private ProposedPatch buildPatch(String fileName, String oldContent, String newContent) throws IOException {

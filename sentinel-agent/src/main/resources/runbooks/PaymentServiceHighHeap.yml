@@ -1,0 +1,15 @@
+alertName: PaymentServiceHighHeap
+title: payment-service heap above 100 MB
+severity: warning
+description: >
+  JVM heap on payment-service has exceeded 100 MB for over 20 seconds.
+  Unlike lab-rat's static-list leak, payment-service simulates retry-buffer
+  accumulation: outbound calls fail, requests retry, each retry holds a
+  byte buffer until success — under sustained downstream failure the
+  buffers pile up. Triggered by /chaos/memory-pressure in this demo.
+steps:
+  - fetchLatestErrors and look for "retaining N MB of buffers (simulated retry storm)" — confirms /chaos/memory-pressure
+  - Check whether PaymentServiceErrorRate is also firing — co-firing is the smoking gun for retry-storm OOM
+  - In production: cap retry buffer size, bound the retry queue, or shed load when downstream is unhealthy
+  - Short-term: call /chaos/memory-pressure/clear to release retained buffers (or restart the container in real production)
+  - Proposed fix should add an upper bound to the retention list and document the memory budget per request

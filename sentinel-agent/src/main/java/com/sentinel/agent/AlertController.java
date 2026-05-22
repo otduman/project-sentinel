@@ -1,5 +1,6 @@
 package com.sentinel.agent;
 
+import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.task.TaskExecutor;
 import org.springframework.http.ResponseEntity;
@@ -9,6 +10,14 @@ import java.util.Map;
 
 /**
  * Webhook receiver for Prometheus AlertManager.
+ *
+ * <h3>Authentication</h3>
+ * Bearer-token auth via {@code agent.webhook.secret} is mandatory — the
+ * controller fails fast at startup if the property is blank. Unauthenticated
+ * resolved-webhooks would let any caller close active episodes and force the
+ * next firing alert to spawn a fresh Gemini investigation (token-burn DoS).
+ * Fail-closed at startup mirrors the {@code agent.patch.secret} pattern in
+ * {@link PatchController#requireAuth}.
  */
 @RestController
 @RequestMapping("/webhook/prometheus")
@@ -16,6 +25,16 @@ public class AlertController {
 
     @Value("${agent.webhook.secret:}")
     private String webhookSecret;
+
+    @PostConstruct
+    void validateConfig() {
+        if (webhookSecret == null || webhookSecret.isBlank()) {
+            throw new IllegalStateException(
+                    "agent.webhook.secret is not configured. Set AGENT_WEBHOOK_SECRET in .env "
+                            + "to a 32+ char random value. Unauthenticated webhooks allow "
+                            + "token-burn DoS via fake resolved-status messages.");
+        }
+    }
 
     private final SreAgent sreAgent;
     private final TaskExecutor investigationExecutor;
@@ -34,7 +53,7 @@ public class AlertController {
             @RequestHeader(value = "Authorization", required = false) String authHeader,
             @RequestBody Map<String, Object> payload) {
 
-        if (!webhookSecret.isBlank() && !("Bearer " + webhookSecret).equals(authHeader)) {
+        if (!("Bearer " + webhookSecret).equals(authHeader)) {
             return ResponseEntity.status(401).build();
         }
 
